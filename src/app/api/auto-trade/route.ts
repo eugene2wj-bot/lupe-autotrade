@@ -859,6 +859,14 @@ export async function POST(request: Request) {
 
     // ── 4. 자동매매 / 주문 생성 실행 ────────────────────────────
     if (isTradeAction) {
+      if (!is_global_auto_trade && !forceTest) {
+        console.log('⛔ [AutoTrade Safeguard] Master Guardrail: is_global_auto_trade is OFF. Aborting trade execution.');
+        return NextResponse.json({
+          success: false,
+          message: '⛔ 전체 자동매매가 비활성화(OFF) 상태입니다. 모든 장전 자동 주문 생성 및 전송이 100% 안전하게 차단되었습니다.',
+          orders: [],
+        });
+      }
       // A) cycleId / cycleName / clientCycle 이 지정된 경우 단일 사이클 수행
       if (cycleId || cycleName || clientCycle) {
         let cycleRow: any = null;

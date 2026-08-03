@@ -469,156 +469,7 @@ function AutoTradeSettingsInner() {
     }
   };
 
-  // 🧪 [가상 주문 테스트] (해당일 매매 가이드 수량/가격 기반 실행)
-  const handleTestOrderSubmit = async () => {
-    const targetCycle = cycles.find((c) => c.id === selectedCycleId) || cycles[0];
-    if (!targetCycle) {
-      alert('테스트할 사이클이 없습니다.');
-      return;
-    }
 
-    addLog(`🧪 사이클 [${targetCycle.name}] (${targetCycle.ticker}) 가상 주문 실행 중...`);
-    const res = await submitSimulatedOrders(targetCycle);
-
-    if (res.success) {
-      addLog(`✅ [가상 주문 생성 성공] 총 ${res.count}건의 해당일 매매 가이드 주문 생성 및 auto_orders DB 저장 완료!`);
-
-      const orderSummaryLines: string[] = [];
-      if (Array.isArray(res.orders) && res.orders.length > 0) {
-        res.orders.forEach((o: any) => {
-          const sideStr = o.type === 'buy' ? '🔵 매수' : '🔴 매도';
-          const priceStr = o.price === 0 ? 'MOC' : `$${(o.price / 100).toFixed(2)}`;
-          const totalStr = o.price > 0 ? ` (≈$${((o.price * o.qty) / 100).toFixed(2)})` : '';
-          const line = `  • ${sideStr} | ${o.label} — ${priceStr} × ${o.qty}주${totalStr}`;
-          addLog(line);
-          orderSummaryLines.push(line);
-        });
-      }
-
-      addLog(`📱 텔레그램 주문 제출보고서 발송 완료`);
-
-      const alertBody = orderSummaryLines.length > 0
-        ? `[생성된 가상 주문 목록]\n${orderSummaryLines.join('\n')}\n\n💾 auto_orders DB (status: 'simulated') 기록 완료\n📱 텔레그램 알림 발송 완료`
-        : '제출 예정 가이드 주문이 없습니다.';
-
-      alert(`✅ [${targetCycle.name}] 해당일 매매 가이드 가상 주문 ${res.count}건 실행 완료!\n\n${alertBody}`);
-    } else {
-      const errorMsg = res.message || '가상 주문 처리 실패';
-      addLog(`🔴 DB/텔레그램 오류: ${errorMsg}`);
-      alert(`🔴 가상 주문 테스트 실패:\n\n${errorMsg}`);
-    }
-  };
-
-  // 📊 [장 마감 시세 수집 & 가이드 산출 즉시 실행]
-  const handleSyncClosePrice = async () => {
-    const targetCycle = cycles.find((c) => c.id === selectedCycleId) || cycles[0];
-    const cycleNameStr = targetCycle ? `[${targetCycle.name}] ` : '';
-
-    addLog(`📊 [장 마감 시세 수집] ${cycleNameStr}전일 마감 종가 수집 & 매매 가이드 산출 시작...`);
-    try {
-      const res = await fetch('/api/auto-trade', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          action: 'POST_MARKET_CLOSE_SYNC',
-          cycleId: targetCycle?.id || selectedCycleId,
-        }),
-      });
-
-      const data = await res.json().catch(() => ({}));
-      if (res.ok && data.success) {
-        addLog(`✅ [장 마감 시세 수집 완료] ${data.message || 'daily_records 및 매매 가이드 갱신 완료'}`);
-        if (Array.isArray(data.results)) {
-          data.results.forEach((r: any) => {
-            addLog(`  • [${r.cycleName}] 마감가: $${r.closePrice?.toFixed(2)} (${r.changePercent >= 0 ? '+' : ''}${r.changePercent?.toFixed(2)}%) -> T=${r.stats?.currentT}, 보유 ${r.stats?.holdingQty}주`);
-            if (Array.isArray(r.orderLines)) {
-              r.orderLines.forEach((l: string) => addLog(`    ${l}`));
-            }
-          });
-        }
-        alert(`✅ ${cycleNameStr}장 마감 종가 수집 & 매매 가이드 산출이 성공적으로 완료되었습니다.`);
-      } else {
-        const errorMsg = data.message || data.error || '장 마감 시세 수집 처리 실패';
-        addLog(`🔴 [시세 수집 실패] ${errorMsg}`);
-        alert(`🔴 장 마감 시세 수집 실패:\n\n${errorMsg}`);
-      }
-    } catch (err: any) {
-      const errStr = err?.message || '네트워크 오류';
-      addLog(`🔴 [시세 수집 오류] ${errStr}`);
-      alert(`🔴 통신 오류: ${errStr}`);
-    }
-  };
-
-  // 🔄 [체결 기록 동기화 테스트]
-  const handleTestExecutionSync = async () => {
-    const targetCycle = cycles.find((c) => c.id === selectedCycleId) || cycles[0];
-    if (!targetCycle) {
-      alert('테스트할 사이클이 없습니다.');
-      return;
-    }
-
-    addLog(`🔄 사이클 [${targetCycle.name}] 체결 기록 동기화 테스트 시작...`);
-    const res = await syncExecutions(targetCycle);
-
-    if (res.success) {
-      addLog(`✅ 체결 내역 ${res.newLogs.length}건 수집 및 trade_logs DB 갱신 완료!`);
-      addLog(`📱 텔레그램 체결 동기화보고서 발송 완료`);
-      alert(`[${targetCycle.name}] 체결 내역 ${res.newLogs.length}건이 DB에 갱신되고 텔레그램 알림이 발송되었습니다.`);
-    } else {
-      const errorMsg = res.message || '체결 동기화 실패';
-      addLog(`🔴 DB/텔레그램 오류: ${errorMsg}`);
-      alert(errorMsg);
-    }
-  };
-
-  // 🚀 [장전 자동주문 즉시 실행] 수동 실행 버튼
-  const handleExecuteDailyTrade = async () => {
-    const targetCycle = cycles.find((c) => c.id === selectedCycleId) || cycles[0];
-    const cycleNameStr = targetCycle ? `[${targetCycle.name}] ` : '';
-
-    const isConfirmed = confirm(`오늘의 ${cycleNameStr}장전 자동주문(LOC)을 즉시 실행하시겠습니까?`);
-    if (!isConfirmed) return;
-
-    addLog(`🚀 [장전 자동주문 즉시 실행] ${cycleNameStr}백엔드로 EXECUTE_DAILY_TRADE 요청 전송 중...`);
-    try {
-      const res = await fetch('/api/auto-trade', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          action: 'EXECUTE_DAILY_TRADE',
-          cycleId: targetCycle?.id || selectedCycleId,
-          cycleName: targetCycle?.name,
-          forceTest: true,
-        }),
-      });
-
-      const data = await res.json().catch(() => ({}));
-      if (res.ok && data.success) {
-        const detailMsg = data.message || '장전 자동주문(LOC) 실행이 성공적으로 완료되었습니다.';
-        addLog(`✅ [장전 자동주문 즉시 실행 성공] ${detailMsg}`);
-
-        if (data.totalOrders !== undefined) {
-          addLog(`📊 처리결과: ${data.totalCycles || 1}개 사이클 중 ${data.successCount || 1}개 성공 (총 ${data.totalOrders}건 주문 생성)`);
-        }
-
-        if (Array.isArray(data.results)) {
-          data.results.forEach((r: any) => {
-            addLog(`  • [${r.cycleName}] ${r.message || (r.success ? '완료' : '실패')}`);
-          });
-        }
-
-        alert(`✅ ${cycleNameStr}장전 자동주문(LOC) 실행 결과:\n\n${detailMsg}`);
-      } else {
-        const errorMsg = data.message || data.error || '장전 자동주문 실행 중 오류가 발생했습니다.';
-        addLog(`🔴 [장전 자동주문 즉시 실행 실패] ${errorMsg}`);
-        alert(`🔴 장전 자동주문(LOC) 실행 실패:\n\n${errorMsg}`);
-      }
-    } catch (err: any) {
-      const errStr = err?.message || '네트워크 오류가 발생했습니다.';
-      addLog(`🔴 [장전 자동주문 통신 오류] ${errStr}`);
-      alert(`🔴 통신 오류가 발생했습니다: ${errStr}`);
-    }
-  };
 
   // ── 🔒 PIN 미인증 시 화면 전체 가림 모달 ──
   if (!isUnlocked) {
@@ -738,15 +589,15 @@ function AutoTradeSettingsInner() {
         </div>
       </div>
 
-      {/* ── 1. 전역 및 개별 사이클 자동매매 스위치 ── */}
+      {/* ── 1. 전역 및 개별 사이클 자동매매 스위치 & DB 청소 ── */}
       <div className="bg-white dark:bg-gray-900 rounded-2xl p-5 shadow-xs space-y-4 border border-gray-100 dark:border-gray-800">
         <div className="flex items-center justify-between border-b border-gray-100 dark:border-gray-800 pb-3">
           <div>
             <h2 className="text-base font-bold text-gray-900 dark:text-gray-50 flex items-center gap-1.5">
-              <span>🤖</span> 전역 자동매매 마스터 스위치
+              <span>🛡️</span> 전역 자동매매 마스터 안전 스위치
             </h2>
             <p className="text-xs text-gray-400 dark:text-gray-500 mt-0.5">
-              OFF 설정 시 지정 시각이 되더라도 주문 생성이 차단됩니다.
+              OFF 설정 시 크론 및 모든 장전 자동 주문 처리가 절대 실행되지 않고 완전 차단됩니다.
             </p>
           </div>
           <button
@@ -763,6 +614,43 @@ function AutoTradeSettingsInner() {
             />
           </button>
         </div>
+
+        {/* 🔒 안전 상태 배너 */}
+        {settings.is_global_auto_trade ? (
+          <div className="p-3 bg-indigo-50 dark:bg-indigo-950/40 border border-indigo-200 dark:border-indigo-800 rounded-xl flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <span className="text-base">✅</span>
+              <div>
+                <span className="text-xs font-bold text-indigo-700 dark:text-indigo-300">
+                  전체 자동매매 활성화(ON) 상태
+                </span>
+                <p className="text-[11px] text-indigo-600 dark:text-indigo-400">
+                  지정 시각({settings.auto_trade_time})에 활성 사이클의 장전 자동 매매 주문이 실행됩니다.
+                </p>
+              </div>
+            </div>
+            <span className="px-2.5 py-1 text-[11px] font-bold text-indigo-700 bg-indigo-100 dark:bg-indigo-900 rounded-lg shrink-0">
+              자동매매 ON
+            </span>
+          </div>
+        ) : (
+          <div className="p-3 bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-800 rounded-xl flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <span className="text-base">⛔</span>
+              <div>
+                <span className="text-xs font-bold text-rose-700 dark:text-rose-300">
+                  전체 자동매매 완전 차단(OFF) 상태
+                </span>
+                <p className="text-[11px] text-rose-600 dark:text-rose-400">
+                  모든 장전 자동주문 생성, 토스 API 전송 및 크론 실행이 절대 돌지 않고 100% 안전하게 차단 중입니다.
+                </p>
+              </div>
+            </div>
+            <span className="px-2.5 py-1 text-[11px] font-bold text-rose-700 bg-rose-100 dark:bg-rose-900 rounded-lg shrink-0">
+              안전 차단 중
+            </span>
+          </div>
+        )}
 
         {/* 개별 사이클 자동매매 및 C.R.U.D 관리 */}
         <div className="space-y-3">
@@ -1022,106 +910,6 @@ function AutoTradeSettingsInner() {
           </button>
         </div>
       </form>
-
-      {/* ── 3. 테스트 컨트롤 ── */}
-      <div className="bg-white dark:bg-gray-900 rounded-2xl p-5 shadow-xs space-y-4 border border-gray-100 dark:border-gray-800">
-        <h2 className="text-base font-bold text-gray-900 dark:text-gray-50 flex items-center gap-1.5 border-b border-gray-100 dark:border-gray-800 pb-3">
-          <span>🧪</span> 토스 API & 텔레그램 연동 테스트
-        </h2>
-
-        <div className="flex flex-wrap items-center gap-3">
-          <div className="flex items-center gap-2 bg-gray-50 dark:bg-gray-800/80 px-3 py-1.5 rounded-xl border border-gray-200 dark:border-gray-700">
-            <span className="text-xs font-bold text-gray-700 dark:text-gray-300">🎯 실행/테스트 대상:</span>
-            <select
-              value={selectedCycleId || ''}
-              onChange={(e) => setSelectedCycleId(e.target.value)}
-              className="px-2.5 py-1 text-xs font-bold bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-lg outline-none focus:border-indigo-500"
-            >
-              {cycles.map((c) => (
-                <option key={c.id} value={c.id}>
-                  {c.name} ({c.ticker})
-                </option>
-              ))}
-            </select>
-          </div>
-
-          <button
-            type="button"
-            onClick={handleExecuteDailyTrade}
-            className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 active:scale-95 text-white font-bold text-xs rounded-xl shadow-xs transition-all flex items-center gap-1.5"
-          >
-            <span>🚀</span> [{cycles.find((c) => c.id === selectedCycleId)?.name || '선택 사이클'}] 장전 주문 즉시 실행
-          </button>
-
-          <button
-            type="button"
-            onClick={handleSyncClosePrice}
-            className="px-4 py-2 bg-blue-600 hover:bg-blue-700 active:scale-95 text-white font-bold text-xs rounded-xl shadow-xs transition-all"
-          >
-            🔄 전일 종가 수집 및 가이드 즉시 갱신
-          </button>
-
-          <button
-            type="button"
-            onClick={async () => {
-              if (confirm('백업 데이터(TQQQ 1차 52건, SOXL 1차 53건 매매 기록)를 Supabase DB로 복원하고 현재 포지션(T회차, 평단, 보유량)을 재계산하시겠습니까?')) {
-                addLog('🔄 Supabase DB 백업 데이터 100% 복원 및 포지션 재계산 시작...');
-                try {
-                  const res = await fetch('/api/auto-trade', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ action: 'RESTORE_INITIAL_CYCLES' }),
-                  });
-                  const data = await res.json();
-                  if (data.success) {
-                    addLog(data.message);
-                    if (data.results) {
-                      data.results.forEach((r: any) => {
-                        addLog(`📌 [${r.name}] ${r.logsCount}건 매매기록 이식 ➔ T=${r.stats.currentT} / 평단=$${r.stats.avgPriceDollars} / 보유=${r.stats.holdingQty}주 (${r.stats.phase})`);
-                      });
-                    }
-                    await loadFromDb();
-                    alert(`✅ TQQQ 1차 백업 데이터 DB 이식 및 포지션 자동 재계산이 완료되었습니다!`);
-                  } else {
-                    addLog(`🔴 복원 실패: ${data.error || data.message}`);
-                    alert(`🔴 복원 실패: ${data.error || data.message}`);
-                  }
-                } catch (err: any) {
-                  addLog(`🔴 복원 요청 에러: ${err?.message || err}`);
-                }
-              }
-            }}
-            className="px-4 py-2 bg-amber-600 hover:bg-amber-700 active:scale-95 text-white font-bold text-xs rounded-xl shadow-xs transition-all"
-          >
-            🔄 TQQQ 1차 / SOXL 1차 백업 데이터 DB 복원 & 포지션 재계산
-          </button>
-
-          <button
-            type="button"
-            onClick={handleTestOrderSubmit}
-            className="px-4 py-2 bg-purple-600 hover:bg-purple-700 active:scale-95 text-white font-bold text-xs rounded-xl shadow-xs transition-all"
-          >
-            🧪 가상 주문 테스트
-          </button>
-
-          <button
-            type="button"
-            onClick={handleTestExecutionSync}
-            className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 active:scale-95 text-white font-bold text-xs rounded-xl shadow-xs transition-all"
-          >
-            🔄 체결 기록 동기화 테스트
-          </button>
-        </div>
-
-        {/* 테스트 로그 터미널 모니터 */}
-        {testLog.length > 0 && (
-          <div className="mt-3 p-3 bg-gray-950 text-emerald-400 font-mono text-[11px] rounded-xl space-y-1 max-h-48 overflow-y-auto border border-gray-800">
-            {testLog.map((line, idx) => (
-              <div key={idx}>{line}</div>
-            ))}
-          </div>
-        )}
-      </div>
 
       {/* 🔑 PIN 번호 변경 모달 팝업 */}
       {showChangePinModal && (
