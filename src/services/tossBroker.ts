@@ -5,7 +5,6 @@
 // -------------------------------------------------------
 
 import type { Cycle, Order, TradeLog } from '@/types/cycle';
-import { ProxyAgent, fetch as undiciFetch } from 'undici';
 
 export interface TossOrderResult {
   success: boolean;
@@ -31,8 +30,16 @@ const TOSS_BASE_URL = 'https://openapi.tossinvest.com';
 
 /**
  * Fixie Proxy (FIXIE_URL) 고정 IP 지원 HTTP Fetch 래퍼
+ * - undici는 Node.js 전용 모듈로, 브라우저/SSR 페이지 렌더링 시 크래시 방지를 위해
+ *   동적 import(lazy)로 호출 시점에만 로드합니다.
+ * - ProxyAgent 생성 실패 시 기본 fetch로 안전 Fallback됩니다.
  */
 async function tossFetch(url: string, options: RequestInit = {}): Promise<Response> {
+  // 브라우저 환경에서는 프록시 없이 글로벌 fetch 사용
+  if (typeof window !== 'undefined') {
+    return fetch(url, options);
+  }
+
   const fixieUrl = (
     process.env.FIXIE_URL ||
     process.env.FIXIE_URL_PROXY ||
@@ -43,6 +50,8 @@ async function tossFetch(url: string, options: RequestInit = {}): Promise<Respon
   if (fixieUrl) {
     console.log('🌐 [Fixie Proxy] 고정 IP 프록시를 통해 토스 API 호출 중...');
     try {
+      // ⚠️ 동적 import: 모듈 최상단에서 로드하지 않아 클라이언트 크래시 방지
+      const { ProxyAgent, fetch: undiciFetch } = await import('undici');
       const dispatcher = new ProxyAgent(fixieUrl);
       const res = await undiciFetch(url, {
         ...(options as any),
@@ -50,7 +59,8 @@ async function tossFetch(url: string, options: RequestInit = {}): Promise<Respon
       });
       return res as unknown as Response;
     } catch (err: any) {
-      console.warn('[Fixie Proxy] 프록시 연결 오류, 기본 fetch로 fallback 진행:', err?.message || err);
+      console.error('⚠️ [Fixie Proxy Init Failed]', err?.message || err);
+      console.warn('[Fixie Proxy] 기본 fetch로 Fallback 진행합니다.');
     }
   }
 
