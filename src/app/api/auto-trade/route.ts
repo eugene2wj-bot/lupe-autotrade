@@ -25,33 +25,37 @@ export async function POST(request: Request) {
     const { action, cycleId, cycleName, cycle: clientCycle, forceTest } = body;
 
     // ── 1. 설정 저장 액션 (`SAVE_SETTINGS` 또는 `save-settings`) ───────────
+    // ── 1. 설정 저장 액션 (`SAVE_SETTINGS` 또는 `save-settings`) ───────────
     if (action === 'SAVE_SETTINGS' || action === 'save-settings') {
-      const { settings: newSettings } = body;
-      if (!newSettings) {
-        return NextResponse.json(
-          { success: false, error: 'settings 객체가 누락되었습니다.', message: 'settings 객체 파라미터가 누락되었습니다.' },
-          { status: 400 }
-        );
-      }
+      const src = body.settings || body || {};
 
-      // 기존 app_settings row의 id 유동 파악 (INTEGER vs TEXT 스키마 감지)
-      const { data: existingRow } = await supabaseAdmin
+      // 기존 DB에 저장된 app_settings 행 조회 (기존 값 보존 방어 로직)
+      const { data: existingSettings } = await supabaseAdmin
         .from('app_settings')
-        .select('id')
+        .select('*')
         .limit(1)
         .maybeSingle();
 
-      let targetId: any = existingRow?.id ?? newSettings.id ?? 1;
+      const toss_app_key = src.tossAppKey ?? src.toss_app_key;
+      const toss_app_secret = src.tossAppSecret ?? src.toss_app_secret;
+      const toss_account_no = src.tossAccountNo ?? src.toss_account_no;
+      const telegram_bot_token = src.telegramBotToken ?? src.telegram_bot_token;
+      const telegram_chat_id = src.telegramChatId ?? src.telegram_chat_id;
+      const auto_trade_time = src.autoTradeTime ?? src.auto_trade_time;
+      const is_global_auto_trade = src.is_global_auto_trade ?? src.isGlobalAutoTrade;
 
+      let targetId: any = existingSettings?.id ?? src.id ?? 1;
+
+      // 비어있거나 누락된 경우 기존 DB 값 보존
       const payload: any = {
         id: targetId,
-        is_global_auto_trade: newSettings.is_global_auto_trade ?? false,
-        toss_app_key: newSettings.toss_app_key ?? '',
-        toss_app_secret: newSettings.toss_app_secret ?? '',
-        toss_account_no: newSettings.toss_account_no ?? '',
-        telegram_bot_token: newSettings.telegram_bot_token ?? '',
-        telegram_chat_id: newSettings.telegram_chat_id ?? '',
-        auto_trade_time: newSettings.auto_trade_time ?? '22:30',
+        is_global_auto_trade: is_global_auto_trade !== undefined ? is_global_auto_trade : (existingSettings?.is_global_auto_trade ?? false),
+        toss_app_key: (toss_app_key !== undefined && toss_app_key !== null && toss_app_key !== '') ? toss_app_key : (existingSettings?.toss_app_key ?? ''),
+        toss_app_secret: (toss_app_secret !== undefined && toss_app_secret !== null && toss_app_secret !== '') ? toss_app_secret : (existingSettings?.toss_app_secret ?? ''),
+        toss_account_no: (toss_account_no !== undefined && toss_account_no !== null && toss_account_no !== '') ? toss_account_no : (existingSettings?.toss_account_no ?? ''),
+        telegram_bot_token: (telegram_bot_token !== undefined && telegram_bot_token !== null && telegram_bot_token !== '') ? telegram_bot_token : (existingSettings?.telegram_bot_token ?? ''),
+        telegram_chat_id: (telegram_chat_id !== undefined && telegram_chat_id !== null && telegram_chat_id !== '') ? telegram_chat_id : (existingSettings?.telegram_chat_id ?? ''),
+        auto_trade_time: (auto_trade_time !== undefined && auto_trade_time !== null && auto_trade_time !== '') ? auto_trade_time : (existingSettings?.auto_trade_time ?? '22:30'),
         updated_at: new Date().toISOString(),
       };
 

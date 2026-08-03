@@ -77,12 +77,32 @@ export default function AutoTradeSettingsPage() {
     setIsSaving(true);
     try {
       addLog('💾 /api/auto-trade 라우트로 app_settings DB 저장 요청 중...');
+
+      // camelCase 및 snake_case 바인딩 100% 보장 패킷 생성
+      const settingsPayload = {
+        toss_app_key: settings.toss_app_key,
+        toss_app_secret: settings.toss_app_secret,
+        toss_account_no: settings.toss_account_no,
+        telegram_bot_token: settings.telegram_bot_token,
+        telegram_chat_id: settings.telegram_chat_id,
+        auto_trade_time: settings.auto_trade_time,
+        is_global_auto_trade: settings.is_global_auto_trade,
+
+        tossAppKey: settings.toss_app_key,
+        tossAppSecret: settings.toss_app_secret,
+        tossAccountNo: settings.toss_account_no,
+        telegramBotToken: settings.telegram_bot_token,
+        telegramChatId: settings.telegram_chat_id,
+        autoTradeTime: settings.auto_trade_time,
+      };
+
       const res = await fetch('/api/auto-trade', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          action: 'save-settings',
-          settings,
+          action: 'SAVE_SETTINGS',
+          settings: settingsPayload,
+          ...settingsPayload,
         }),
       });
 
