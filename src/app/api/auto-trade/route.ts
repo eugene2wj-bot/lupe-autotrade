@@ -39,12 +39,12 @@ export async function POST(request: Request) {
 
       console.log(`[AutoTradeAPI VERIFY_PIN] inputPin: ${inputPin}, dbPin: ${dbPin}, validPin: ${validPin}`);
 
-      // 입력된 PIN이 DB PIN 또는 기본 PIN '1234'와 일치 시 100% 진입 허용
-      if (inputPin === validPin || inputPin === '1234') {
+      // 엄격한 PIN 검증: DB에 저장된 PIN 번호(validPin)와 100% 일치할 때만 승인
+      if (inputPin === validPin) {
         return NextResponse.json({ success: true, message: 'PIN 번호 인증 성공' });
       } else {
         return NextResponse.json(
-          { success: false, error: '보안 PIN 번호가 일치하지 않습니다.', message: '보안 PIN 번호가 일치하지 않습니다. (초기 비밀번호: 1234)' },
+          { success: false, error: '보안 PIN 번호가 일치하지 않습니다.', message: '보안 PIN 번호가 일치하지 않습니다.' },
           { status: 401 }
         );
       }
