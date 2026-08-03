@@ -442,11 +442,25 @@ export async function POST(request: Request) {
           created_at: new Date().toISOString(),
         };
 
-        const { data: inserted, error: orderInsErr } = await supabaseAdmin
+        let { data: inserted, error: orderInsErr } = await supabaseAdmin
           .from('auto_orders')
           .insert(orderRecord)
           .select('*')
           .single();
+
+        // auto_orders 테이블 스키마에 order_response 컬럼이 존재하지 않는 경우 폴백 처리
+        if (orderInsErr && orderInsErr.message.includes('order_response')) {
+          console.warn('[AutoTradeAPI] order_response column missing in auto_orders. Retrying without order_response...');
+          const fallbackRecord = { ...orderRecord };
+          delete (fallbackRecord as any).order_response;
+          const retryOrder = await supabaseAdmin
+            .from('auto_orders')
+            .insert(fallbackRecord)
+            .select('*')
+            .single();
+          inserted = retryOrder.data;
+          orderInsErr = retryOrder.error;
+        }
 
         if (orderInsErr) {
           console.error('[AutoTradeAPI] auto_orders insert failed:', orderInsErr);
