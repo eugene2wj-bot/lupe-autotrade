@@ -29,6 +29,8 @@ export async function submitSimulatedOrders(cycle: Cycle): Promise<{
       body: JSON.stringify({
         action: 'submit-orders',
         cycleId: cycle.id,
+        cycleName: cycle.name,
+        cycle: cycle, // 사이클 전체 객체 전달
         forceTest: true,
       }),
     });
@@ -75,6 +77,8 @@ export async function syncExecutions(cycle: Cycle): Promise<{
       body: JSON.stringify({
         action: 'sync-executions',
         cycleId: cycle.id,
+        cycleName: cycle.name,
+        cycle: cycle, // 사이클 전체 객체 전달
       }),
     });
 

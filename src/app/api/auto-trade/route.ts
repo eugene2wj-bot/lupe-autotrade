@@ -1,5 +1,5 @@
 // -------------------------------------------------------
-// 자동매매 서버 전용 API Route (미국 ET 서머타임 & 휴장일 가드레일)
+// 자동매매 서버 전용 API Route (미국 ET 서머타임 & 휴장일 & 사이클 자동 이식)
 // Server-Only Execution via SUPABASE_SERVICE_ROLE_KEY
 // -------------------------------------------------------
 
@@ -18,7 +18,7 @@ import type { Cycle, TradeLog } from '@/types/cycle';
 export async function POST(request: Request) {
   try {
     const body = await request.json();
-    const { action, cycleId, forceTest } = body;
+    const { action, cycleId, cycleName, cycle: clientCycle, forceTest } = body;
 
     // 1. app_settings 서버 단 조회 (SERVICE_ROLE_KEY 사용)
     const { data: settings, error: settingsErr } = await supabaseAdmin
@@ -53,63 +53,134 @@ export async function POST(request: Request) {
       return NextResponse.json({ success: true, message: '자동매매 스위치 상태가 저장되었습니다.' });
     }
 
-    // B. cycleId 필수 액션 검증
-    if (!cycleId) {
+    // B. cycleId / cycleName 필수 액션 검증
+    if (!cycleId && !cycleName && !clientCycle) {
       return NextResponse.json(
-        { success: false, message: 'cycleId 파라미터가 누락되었습니다.' },
+        { success: false, message: 'cycleId 또는 cycle 객체 파라미터가 누락되었습니다.' },
         { status: 400 }
       );
     }
 
-    // DB에서 대상 사이클 및 체결 내역 조회 (서버 전용)
-    const { data: cycleRow, error: cycleErr } = await supabaseAdmin
-      .from('cycles')
-      .select('*')
-      .eq('id', cycleId)
-      .single();
+    // ── DB에서 대상 사이클 조회 (3단계 폴백 및 자동 Upsert) ───────────
+    let cycleRow: any = null;
 
-    if (cycleErr || !cycleRow) {
+    // 1) id 기반 조회
+    if (cycleId) {
+      const { data } = await supabaseAdmin
+        .from('cycles')
+        .select('*')
+        .eq('id', cycleId)
+        .maybeSingle();
+      cycleRow = data;
+    }
+
+    // 2) name 기반 재조회 (id 조회 실패 시)
+    if (!cycleRow && (cycleName || clientCycle?.name)) {
+      const targetName = cycleName || clientCycle?.name;
+      const { data } = await supabaseAdmin
+        .from('cycles')
+        .select('*')
+        .eq('name', targetName)
+        .maybeSingle();
+      cycleRow = data;
+    }
+
+    // 3) DB에 전혀 없다면 전달받은 clientCycle 기반으로 DB 즉시 Upsert(생성)
+    if (!cycleRow && clientCycle) {
+      console.log(`[AutoTradeAPI] Cycle not found in DB. Auto-upserting clientCycle: ${clientCycle.name} (${clientCycle.id})`);
+      const payload = {
+        id: clientCycle.id || cycleId || crypto.randomUUID(),
+        name: clientCycle.name,
+        ticker: clientCycle.ticker,
+        version: clientCycle.version,
+        split_count: clientCycle.splitCount ?? 40,
+        max_percent: clientCycle.maxPercent ?? 20,
+        principal: clientCycle.principal ?? 0,
+        compound_mode: clientCycle.compoundMode ?? null,
+        status: clientCycle.status ?? 'active',
+        start_date: clientCycle.startDate,
+        commission_rate: clientCycle.commissionRate ?? 0.1,
+        auto_trade_enabled: clientCycle.autoTradeEnabled ?? true,
+        updated_at: new Date().toISOString(),
+      };
+
+      const { data: newRow, error: upsertErr } = await supabaseAdmin
+        .from('cycles')
+        .upsert(payload)
+        .select('*')
+        .single();
+
+      if (!upsertErr && newRow) {
+        cycleRow = newRow;
+
+        // logs가 있다면 trade_logs 테이블에도 함께 이식
+        if (clientCycle.logs && clientCycle.logs.length > 0) {
+          const logsPayload = clientCycle.logs.map((l: TradeLog) => ({
+            id: l.id,
+            cycle_id: newRow.id,
+            date: l.date,
+            type: l.type,
+            order_type: l.orderType,
+            price: l.price,
+            qty: l.qty,
+            memo: l.memo,
+            profit: l.profit,
+            commission_rate: l.commissionRate,
+            batch_id: l.batchId,
+          }));
+          await supabaseAdmin.from('trade_logs').upsert(logsPayload);
+        }
+      }
+    }
+
+    if (!cycleRow && !clientCycle) {
       return NextResponse.json(
         { success: false, message: '해당 사이클을 찾을 수 없습니다.' },
         { status: 404 }
       );
     }
 
+    // DB logs 조회
+    const targetCycleId = cycleRow?.id || clientCycle?.id;
     const { data: dbLogs } = await supabaseAdmin
       .from('trade_logs')
       .select('*')
-      .eq('cycle_id', cycleId)
+      .eq('cycle_id', targetCycleId)
       .order('date', { ascending: true });
 
-    const logs: TradeLog[] = (dbLogs || []).map((row: any) => ({
-      id: row.id,
-      cycleId: row.cycle_id,
-      date: row.date,
-      type: row.type,
-      orderType: row.order_type,
-      price: row.price,
-      qty: row.qty,
-      memo: row.memo,
-      profit: row.profit,
-      commissionRate: row.commission_rate ?? 0.1,
-      batchId: row.batch_id || row.id,
-    }));
+    const logs: TradeLog[] = (dbLogs && dbLogs.length > 0)
+      ? dbLogs.map((row: any) => ({
+          id: row.id,
+          cycleId: row.cycle_id,
+          date: row.date,
+          type: row.type,
+          orderType: row.order_type,
+          price: row.price,
+          qty: row.qty,
+          memo: row.memo,
+          profit: row.profit,
+          commissionRate: row.commission_rate ?? 0.1,
+          batchId: row.batch_id || row.id,
+        }))
+      : (clientCycle?.logs || []);
 
-    const cycle: Cycle = {
-      id: cycleRow.id,
-      name: cycleRow.name,
-      ticker: cycleRow.ticker,
-      version: cycleRow.version,
-      splitCount: cycleRow.split_count ?? 40,
-      maxPercent: cycleRow.max_percent ?? 20,
-      principal: cycleRow.principal ?? 0,
-      compoundMode: cycleRow.compound_mode ?? null,
-      status: cycleRow.status ?? 'active',
-      startDate: cycleRow.start_date,
-      commissionRate: cycleRow.commission_rate ?? 0.1,
-      autoTradeEnabled: cycleRow.auto_trade_enabled ?? true,
-      logs,
-    };
+    const cycle: Cycle = cycleRow
+      ? {
+          id: cycleRow.id,
+          name: cycleRow.name,
+          ticker: cycleRow.ticker,
+          version: cycleRow.version,
+          splitCount: cycleRow.split_count ?? 40,
+          maxPercent: cycleRow.max_percent ?? 20,
+          principal: cycleRow.principal ?? 0,
+          compoundMode: cycleRow.compound_mode ?? null,
+          status: cycleRow.status ?? 'active',
+          startDate: cycleRow.start_date,
+          commissionRate: cycleRow.commission_rate ?? 0.1,
+          autoTradeEnabled: cycleRow.auto_trade_enabled ?? true,
+          logs,
+        }
+      : clientCycle!;
 
     // 미국 동부시간 (ET, 서머타임 자동 반영)
     const nyTime = getNyseTime();
@@ -170,7 +241,7 @@ export async function POST(request: Request) {
       const { data: existingOrders } = await supabaseAdmin
         .from('auto_orders')
         .select('*')
-        .eq('cycle_id', cycleId)
+        .eq('cycle_id', cycle.id)
         .gte('created_at', todayStartIso);
 
       const hasActiveOrderToday = (existingOrders || []).some((o: any) =>
