@@ -1,10 +1,11 @@
 'use client';
 
 import React, { useMemo, useState, useRef, useEffect } from 'react';
-import type { Cycle, TradeLog, OrderType, StockQuote } from '@/types/cycle';
+import type { Cycle, TradeLog, OrderType, StockQuote, DailyRecord } from '@/types/cycle';
 import { formatDollars, toDollars, toCents } from '@/utils/format';
 import { useCycleStore, getQuotesForCycle } from '@/store/cycleStore';
 import { fetchStockQuote, type StockQuoteDetail } from '@/services/stockApi';
+import { fetchDailyRecords } from '@/services/dbService';
 
 const ORDER_TYPE_OPTIONS: { value: OrderType; label: string }[] = [
   { value: 'star', label: '☆매수' },
@@ -36,21 +37,31 @@ const ORDER_TYPE_CONFIG: Record<
  */
 export function buildDailyQuoteMap(
   quotes: StockQuote[],
-  logs: TradeLog[]
+  logs: TradeLog[],
+  dailyRecords: DailyRecord[] = []
 ): Map<string, { close: number; changePercent: number }> {
   const map = new Map<string, { close: number; changePercent: number }>();
-  const dateQuoteMap = new Map<string, number>();
+  const dateQuoteMap = new Map<string, { close: number; changePercent?: number }>();
 
   for (const q of quotes) {
     if (q.close > 0) {
-      dateQuoteMap.set(q.date, q.close);
+      dateQuoteMap.set(q.date, { close: q.close });
+    }
+  }
+
+  for (const dr of dailyRecords) {
+    if (dr.close_price > 0) {
+      dateQuoteMap.set(dr.date, {
+        close: dr.close_price > 1000 ? dr.close_price / 100 : dr.close_price,
+        changePercent: dr.change_percent,
+      });
     }
   }
 
   const sortedLogs = [...logs].sort((a, b) => a.date.localeCompare(b.date));
   for (const log of sortedLogs) {
     if (log.price > 0 && !dateQuoteMap.has(log.date)) {
-      dateQuoteMap.set(log.date, toDollars(log.price));
+      dateQuoteMap.set(log.date, { close: toDollars(log.price) });
     }
   }
 
@@ -58,9 +69,14 @@ export function buildDailyQuoteMap(
 
   for (let i = 0; i < sortedDates.length; i++) {
     const d = sortedDates[i];
-    const close = dateQuoteMap.get(d)!;
-    const prevClose = i > 0 ? dateQuoteMap.get(sortedDates[i - 1])! : close;
-    const changePercent = prevClose > 0 ? ((close - prevClose) / prevClose) * 100 : 0;
+    const info = dateQuoteMap.get(d)!;
+    const close = info.close;
+    let changePercent = info.changePercent;
+
+    if (changePercent === undefined) {
+      const prevClose = i > 0 ? dateQuoteMap.get(sortedDates[i - 1])!.close : close;
+      changePercent = prevClose > 0 ? ((close - prevClose) / prevClose) * 100 : 0;
+    }
     map.set(d, { close, changePercent });
   }
 
@@ -330,21 +346,26 @@ interface TradingHistoryProps {
 export function TradingHistory({ cycle }: TradingHistoryProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const [stockDetail, setStockDetail] = useState<StockQuoteDetail | null>(null);
+  const [dailyRecords, setDailyRecords] = useState<DailyRecord[]>([]);
 
   useEffect(() => {
     fetchStockQuote(cycle.ticker, cycle).then((detail) => setStockDetail(detail));
+    fetchDailyRecords(cycle.id).then((records) => setDailyRecords(records));
   }, [cycle]);
 
   const quotes = stockDetail?.quotes ?? getQuotesForCycle(cycle);
 
   const dailyQuoteMap = useMemo(() => {
-    return buildDailyQuoteMap(quotes, cycle.logs);
-  }, [quotes, cycle.logs]);
+    return buildDailyQuoteMap(quotes, cycle.logs, dailyRecords);
+  }, [quotes, cycle.logs, dailyRecords]);
 
   const tradingDates = useMemo(() => {
-    const dates = [...new Set(cycle.logs.map((l) => l.date))].sort();
-    return dates;
-  }, [cycle.logs]);
+    const logDates = cycle.logs.map((l) => l.date);
+    const drDates = dailyRecords.map((d) => d.date);
+    const quoteDates = quotes.map((q) => q.date);
+    const allDates = [...new Set([...logDates, ...drDates, ...quoteDates])].filter(Boolean).sort();
+    return allDates.length > 0 ? allDates : [...new Set(logDates)].sort();
+  }, [cycle.logs, quotes, dailyRecords]);
 
   const [selectedDate, setSelectedDate] = useState<string | null>(
     tradingDates.length > 0 ? tradingDates[tradingDates.length - 1] : null

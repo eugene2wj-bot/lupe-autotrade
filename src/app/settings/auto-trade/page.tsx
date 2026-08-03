@@ -384,6 +384,46 @@ function AutoTradeSettingsInner() {
     }
   };
 
+  // 📊 [장 마감 시세 수집 & 가이드 산출 즉시 실행]
+  const handleSyncClosePrice = async () => {
+    const targetCycle = cycles.find((c) => c.id === selectedCycleId) || cycles[0];
+    const cycleNameStr = targetCycle ? `[${targetCycle.name}] ` : '';
+
+    addLog(`📊 [장 마감 시세 수집] ${cycleNameStr}전일 마감 종가 수집 & 매매 가이드 산출 시작...`);
+    try {
+      const res = await fetch('/api/auto-trade', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action: 'POST_MARKET_CLOSE_SYNC',
+          cycleId: targetCycle?.id || selectedCycleId,
+        }),
+      });
+
+      const data = await res.json().catch(() => ({}));
+      if (res.ok && data.success) {
+        addLog(`✅ [장 마감 시세 수집 완료] ${data.message || 'daily_records 및 매매 가이드 갱신 완료'}`);
+        if (Array.isArray(data.results)) {
+          data.results.forEach((r: any) => {
+            addLog(`  • [${r.cycleName}] 마감가: $${r.closePrice?.toFixed(2)} (${r.changePercent >= 0 ? '+' : ''}${r.changePercent?.toFixed(2)}%) -> T=${r.stats?.currentT}, 보유 ${r.stats?.holdingQty}주`);
+            if (Array.isArray(r.orderLines)) {
+              r.orderLines.forEach((l: string) => addLog(`    ${l}`));
+            }
+          });
+        }
+        alert(`✅ ${cycleNameStr}장 마감 종가 수집 & 매매 가이드 산출이 성공적으로 완료되었습니다.`);
+      } else {
+        const errorMsg = data.message || data.error || '장 마감 시세 수집 처리 실패';
+        addLog(`🔴 [시세 수집 실패] ${errorMsg}`);
+        alert(`🔴 장 마감 시세 수집 실패:\n\n${errorMsg}`);
+      }
+    } catch (err: any) {
+      const errStr = err?.message || '네트워크 오류';
+      addLog(`🔴 [시세 수집 오류] ${errStr}`);
+      alert(`🔴 통신 오류: ${errStr}`);
+    }
+  };
+
   // 🔄 [체결 기록 동기화 테스트]
   const handleTestExecutionSync = async () => {
     const targetCycle = cycles.find((c) => c.id === selectedCycleId) || cycles[0];
@@ -823,6 +863,14 @@ function AutoTradeSettingsInner() {
             className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 active:scale-95 text-white font-bold text-xs rounded-xl shadow-xs transition-all flex items-center gap-1.5"
           >
             <span>🚀</span> [{cycles.find((c) => c.id === selectedCycleId)?.name || '선택 사이클'}] 장전 주문 즉시 실행
+          </button>
+
+          <button
+            type="button"
+            onClick={handleSyncClosePrice}
+            className="px-4 py-2 bg-blue-600 hover:bg-blue-700 active:scale-95 text-white font-bold text-xs rounded-xl shadow-xs transition-all"
+          >
+            📊 장 마감 종가 수집 & 가이드 산출
           </button>
 
           <button

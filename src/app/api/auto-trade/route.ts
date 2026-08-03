@@ -6,6 +6,7 @@
 import { NextResponse } from 'next/server';
 import { supabaseAdmin } from '@/lib/supabase';
 import { generateGuide, calcCycleStats } from '@/utils/calculator';
+import { fetchStockQuote } from '@/services/stockApi';
 import {
   sendTelegramMessage,
   notifyOrdersSubmittedDetailed,
@@ -430,6 +431,151 @@ async function syncExecutionsForCycle(cycle: Cycle, nyDateStr: string) {
     newLogs,
     count: newLogs.length,
     message: `[${cycle.name}] 체결 기록 ${newLogs.length}건이 DB에 갱신되고 텔레그램 알림이 발송되었습니다.`,
+  };
+}
+
+/**
+ * 미국 장 마감 후 전일 종가 자동 수집, 포트폴리오(T회차/평단/수량) DB 갱신 및 오늘 밤 매매 가이드 자동 산출
+ */
+export async function syncPostMarketClose(targetCycleId?: string) {
+  const nyTime = getNyseTime();
+  const nyDateStr = `${nyTime.getFullYear()}-${String(nyTime.getMonth() + 1).padStart(2, '0')}-${String(nyTime.getDate()).padStart(2, '0')}`;
+
+  let { data: dbCycles } = await supabaseAdmin.from('cycles').select('*');
+  if (!dbCycles || dbCycles.length === 0) dbCycles = initialCyclesData as any[];
+
+  let activeCycles = (dbCycles || []).filter((c: any) => !c.status || c.status === 'active');
+  if (targetCycleId) {
+    activeCycles = activeCycles.filter((c: any) => c.id === targetCycleId);
+  }
+
+  const results: any[] = [];
+
+  for (const cycleRow of activeCycles) {
+    // 1) 체결 기록 수집
+    const { data: dbLogs } = await supabaseAdmin
+      .from('trade_logs')
+      .select('*')
+      .eq('cycle_id', cycleRow.id)
+      .order('date', { ascending: true });
+
+    const logs: TradeLog[] = (dbLogs && dbLogs.length > 0)
+      ? dbLogs.map((row: any) => ({
+          id: row.id,
+          cycleId: row.cycle_id,
+          date: row.date,
+          type: row.type,
+          orderType: row.order_type,
+          price: row.price,
+          qty: row.qty,
+          memo: row.memo,
+          profit: row.profit,
+          commissionRate: row.commission_rate ?? 0.1,
+          batchId: row.batch_id || row.id,
+        }))
+      : [];
+
+    const cycle: Cycle = {
+      id: cycleRow.id,
+      name: cycleRow.name,
+      ticker: cycleRow.ticker,
+      version: cycleRow.version,
+      splitCount: cycleRow.split_count ?? 40,
+      maxPercent: cycleRow.max_percent ?? 20,
+      principal: cycleRow.principal ?? 0,
+      compoundMode: cycleRow.compound_mode ?? null,
+      status: cycleRow.status ?? 'active',
+      startDate: cycleRow.start_date,
+      commissionRate: cycleRow.commission_rate ?? 0.1,
+      autoTradeEnabled: cycleRow.auto_trade_enabled ?? cycleRow.is_auto_trade_enabled ?? true,
+      logs,
+    };
+
+    // 2) Stock API로 최신 전일 종가 및 일봉 시세(quotes) 수집
+    const quoteDetail = await fetchStockQuote(cycle.ticker, cycle);
+    const closePriceDollars = quoteDetail.latestPrice || 0;
+    const changePercent = quoteDetail.changePercent || 0;
+    const closePriceCents = Math.round(closePriceDollars * 100);
+
+    // 3) 포트폴리오 통계 자동 재계산 (평단가, 수량, T회차, Phase 등)
+    const stats = calcCycleStats(cycle, quoteDetail.quotes);
+
+    // 4) DB daily_records 테이블 저장/갱신
+    const dailyRecordPayload = {
+      cycle_id: cycle.id,
+      ticker: (cycle.ticker || '').toUpperCase(),
+      date: nyDateStr,
+      close_price: closePriceCents,
+      change_percent: Math.round(changePercent * 100) / 100,
+      avg_price: Math.round(stats.avgPrice),
+      holding_qty: stats.holdingQty,
+      current_t: stats.currentT,
+      phase: stats.phase,
+      realized_profit: stats.realizedProfit,
+      created_at: new Date().toISOString(),
+    };
+
+    const { error: dailyRecordErr } = await supabaseAdmin
+      .from('daily_records')
+      .upsert(dailyRecordPayload, { onConflict: 'cycle_id,date' });
+
+    if (dailyRecordErr) {
+      console.warn(`[syncPostMarketClose] daily_records table upsert warning (${cycle.name}):`, dailyRecordErr.message);
+    }
+
+    // 5) 오늘 밤 전송할 매매 가이드 자동 산출
+    const { orders } = generateGuide(cycle, quoteDetail.quotes);
+
+    // 6) DB cycles 테이블의 포트폴리오 통계 갱신
+    const { error: cycleUpdateErr } = await supabaseAdmin
+      .from('cycles')
+      .update({
+        updated_at: new Date().toISOString(),
+      })
+      .eq('id', cycle.id);
+
+    if (cycleUpdateErr) {
+      console.warn(`[syncPostMarketClose] cycles update warning (${cycle.name}):`, cycleUpdateErr.message);
+    }
+
+    const orderLines = orders.map((o) => {
+      const priceStr = o.price === 0 ? 'MOC' : `$${(o.price / 100).toFixed(2)}`;
+      return `  • ${o.type === 'buy' ? '🔵 매수' : '🔴 매도'} | ${o.label} — ${priceStr} × ${o.qty}주`;
+    });
+
+    results.push({
+      cycleId: cycle.id,
+      cycleName: cycle.name,
+      ticker: cycle.ticker,
+      closePrice: closePriceDollars,
+      changePercent,
+      stats,
+      orders,
+      orderLines,
+    });
+  }
+
+  // 7) 텔레그램 마감 브리핑 및 산출 가이드 전송
+  const telegramLines = results.map((r) => (
+    `• <b>${r.cycleName} (${r.ticker})</b>: 마감가 <b>$${r.closePrice.toFixed(2)} (${r.changePercent >= 0 ? '+' : ''}${r.changePercent.toFixed(2)}%)</b>\n` +
+    `  T=${r.stats.currentT} / 평단 $${(r.stats.avgPrice / 100).toFixed(2)} / 보유 ${r.stats.holdingQty}주 (${r.stats.phase})\n` +
+    `  <b>[오늘 밤 예정 가이드]</b>\n` +
+    (r.orderLines.length > 0 ? r.orderLines.join('\n') : '  • 제출 예정 가이드 주문 없음')
+  )).join('\n\n');
+
+  const summaryMessage =
+    `📊 <b>[미국 장 마감 종가 수집 & 매매 가이드 자동 산출 완료]</b>\n\n` +
+    `일자: <b>${nyDateStr} (미국 현지 마감)</b>\n` +
+    `처리 사이클: 총 <b>${results.length}개</b>\n\n` +
+    telegramLines;
+
+  await sendTelegramMessage(summaryMessage).catch(() => {});
+
+  return {
+    success: true,
+    message: `장 마감 종가 수집 및 매매 가이드 산출 완료 (총 ${results.length}개 사이클)`,
+    nyDateStr,
+    results,
   };
 }
 
@@ -948,7 +1094,14 @@ export async function POST(request: Request) {
       });
     }
 
-    // ── 6. cycleId / cycleName 필수 액션 검증 ────────────────────────────
+    // ── 6. 장 마감 종가 수집 & 매매 가이드 자동 산출 액션 ─────────────────
+    const isCloseSyncAction = ['POST_MARKET_CLOSE_SYNC', 'SYNC_CLOSE_PRICE', 'cron-close-price', 'sync-close'].includes(action);
+    if (isCloseSyncAction) {
+      const res = await syncPostMarketClose(cycleId || undefined);
+      return NextResponse.json(res);
+    }
+
+    // ── 7. cycleId / cycleName 필수 액션 검증 ────────────────────────────
     if (!cycleId && !cycleName && !clientCycle) {
       return NextResponse.json(
         { success: false, error: 'cycleId 파라미터 누락', message: 'cycleId 또는 cycle 객체 파라미터가 누락되었습니다.' },
@@ -965,6 +1118,30 @@ export async function POST(request: Request) {
         error: `서버 예외: ${err?.message || err}`,
         message: `🔴 서버 처리 예외: ${err?.message || err}`,
       },
+      { status: 500 }
+    );
+  }
+}
+
+/**
+ * Vercel Cron 또는 브라우저/HTTP GET 호출 호환 래퍼
+ */
+export async function GET(request: Request) {
+  try {
+    const url = new URL(request.url);
+    const action = url.searchParams.get('action') || 'EXECUTE_DAILY_TRADE';
+    const cycleId = url.searchParams.get('cycleId') || undefined;
+
+    const mockRequest = new Request(request.url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action, cycleId, forceTest: false }),
+    });
+
+    return POST(mockRequest);
+  } catch (err: any) {
+    return NextResponse.json(
+      { success: false, error: err?.message || err },
       { status: 500 }
     );
   }

@@ -3,7 +3,7 @@
 // -------------------------------------------------------
 
 import { supabase } from '@/lib/supabase';
-import type { AppSettings, AutoOrder, Cycle, TradeLog } from '@/types/cycle';
+import type { AppSettings, AutoOrder, Cycle, DailyRecord, TradeLog } from '@/types/cycle';
 import initialCyclesData from '@/data/cycles.json';
 
 const DEFAULT_SETTINGS: AppSettings = {
@@ -330,5 +330,68 @@ export async function saveAutoOrder(order: AutoOrder): Promise<boolean> {
   } catch (err) {
     console.warn('[DBService] saveAutoOrder failed:', err);
     return false;
+  }
+}
+
+/**
+ * 일별 장 마감 시세 기록 DB 저장 (`daily_records` 테이블)
+ */
+export async function saveDailyRecord(record: DailyRecord): Promise<boolean> {
+  try {
+    const payload = {
+      cycle_id: record.cycle_id,
+      ticker: record.ticker,
+      date: record.date,
+      close_price: record.close_price,
+      change_percent: record.change_percent,
+      avg_price: record.avg_price,
+      holding_qty: record.holding_qty,
+      current_t: record.current_t,
+      phase: record.phase,
+      realized_profit: record.realized_profit,
+      created_at: new Date().toISOString(),
+    };
+
+    const { error } = await supabase.from('daily_records').upsert(payload, { onConflict: 'cycle_id,date' });
+    if (error) {
+      // 테이블이 아직 없는 경우 경고 로그만 남기고 차단되지 않도록 처리
+      console.warn('[DBService] saveDailyRecord warning/fallback:', error.message);
+      return false;
+    }
+    return true;
+  } catch (err) {
+    console.warn('[DBService] saveDailyRecord exception:', err);
+    return false;
+  }
+}
+
+/**
+ * 일별 장 마감 시세 기록 DB 조회 (`daily_records` 테이블)
+ */
+export async function fetchDailyRecords(cycleId?: string): Promise<DailyRecord[]> {
+  try {
+    let query = supabase.from('daily_records').select('*').order('date', { ascending: true });
+    if (cycleId) {
+      query = query.eq('cycle_id', cycleId);
+    }
+    const { data, error } = await query;
+    if (error || !data) return [];
+
+    return data.map((row: any) => ({
+      id: row.id,
+      cycle_id: row.cycle_id,
+      ticker: row.ticker,
+      date: row.date,
+      close_price: row.close_price,
+      change_percent: row.change_percent,
+      avg_price: row.avg_price,
+      holding_qty: row.holding_qty,
+      current_t: row.current_t,
+      phase: row.phase,
+      realized_profit: row.realized_profit,
+      created_at: row.created_at,
+    }));
+  } catch {
+    return [];
   }
 }

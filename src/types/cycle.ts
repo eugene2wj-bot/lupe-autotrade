@@ -129,3 +129,18 @@ export interface NewCycleFormState {
   compoundMode: CompoundMode;
   commissionRate: number;
 }
+
+export interface DailyRecord {
+  id?: string;
+  cycle_id: string;
+  ticker: string;
+  date: string; // YYYY-MM-DD
+  close_price: number; // 센트 단위 정수
+  change_percent: number;
+  avg_price?: number;
+  holding_qty?: number;
+  current_t?: number;
+  phase?: string;
+  realized_profit?: number;
+  created_at?: string;
+}
