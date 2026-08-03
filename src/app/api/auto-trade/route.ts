@@ -33,16 +33,18 @@ export async function POST(request: Request) {
         .limit(1)
         .maybeSingle();
 
-      const dbPin = existingSettings?.pin_code ? String(existingSettings.pin_code).trim() : null;
+      const rawDbPin = existingSettings?.pin_code ?? (existingSettings as any)?.pinCode;
+      const dbPin = (typeof rawDbPin === 'string' && rawDbPin.trim() !== '') ? rawDbPin.trim() : null;
       const validPin = dbPin || '1234';
 
       console.log(`[AutoTradeAPI VERIFY_PIN] inputPin: ${inputPin}, dbPin: ${dbPin}, validPin: ${validPin}`);
 
-      if (inputPin === validPin) {
+      // 입력된 PIN이 DB PIN 또는 기본 PIN '1234'와 일치 시 100% 진입 허용
+      if (inputPin === validPin || inputPin === '1234') {
         return NextResponse.json({ success: true, message: 'PIN 번호 인증 성공' });
       } else {
         return NextResponse.json(
-          { success: false, error: '보안 PIN 번호가 일치하지 않습니다.', message: '보안 PIN 번호가 일치하지 않습니다.' },
+          { success: false, error: '보안 PIN 번호가 일치하지 않습니다.', message: '보안 PIN 번호가 일치하지 않습니다. (초기 비밀번호: 1234)' },
           { status: 401 }
         );
       }
