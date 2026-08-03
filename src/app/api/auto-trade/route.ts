@@ -47,11 +47,25 @@ export async function POST(request: Request) {
       };
 
       // Service Role Key 기반 DB Upsert (RLS 우회)
-      const { data: savedData, error: saveErr } = await supabaseAdmin
+      let { data: savedData, error: saveErr } = await supabaseAdmin
         .from('app_settings')
         .upsert(payload)
         .select('*')
         .single();
+
+      // auto_trade_time 컬럼이 Supabase DB 스키마에 존재하지 않는 경우 폴백 처리
+      if (saveErr && saveErr.message.includes('auto_trade_time')) {
+        console.warn('[AutoTradeAPI] auto_trade_time column missing in DB. Retrying without auto_trade_time field...');
+        const fallbackPayload = { ...payload };
+        delete (fallbackPayload as any).auto_trade_time;
+        const retry = await supabaseAdmin
+          .from('app_settings')
+          .upsert(fallbackPayload)
+          .select('*')
+          .single();
+        savedData = retry.data;
+        saveErr = retry.error;
+      }
 
       if (saveErr) {
         console.error('[AutoTradeAPI] app_settings upsert error:', saveErr);
@@ -59,7 +73,7 @@ export async function POST(request: Request) {
           {
             success: false,
             error: `DB 저장 실패: ${saveErr.message}`,
-            message: `🔴 DB 저장 실패: ${saveErr.message}`,
+            message: `🔴 DB 저장 실패: ${saveErr.message}. (Supabase SQL Editor에서 ALTER TABLE app_settings ADD COLUMN auto_trade_time TEXT; 실행 필요)`,
           },
           { status: 500 }
         );
