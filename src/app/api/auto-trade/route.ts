@@ -422,18 +422,22 @@ export async function POST(request: Request) {
         });
       }
 
-      // 🟢 auto_orders DB 저장 (error 반환 명시 체크)
+      // 🟢 auto_orders DB 저장 (정형화된 필드 규격 준수 & undefined ➔ 기본값 변환)
       const createdOrderRecords: any[] = [];
       for (const o of orders) {
+        const rawPrice = typeof o.price === 'number' ? o.price : 0;
+        const rawQty = typeof o.qty === 'number' ? o.qty : 0;
+
         const orderRecord = {
-          cycle_id: cycle.id,
-          ticker: cycle.ticker,
-          order_type: o.orderType,
-          side: o.type,
-          price: o.price,
-          qty: o.qty,
+          cycle_id: cycle.id || '',
+          ticker: (cycle.ticker || '').toUpperCase(),
+          order_type: o.orderType || 'star',
+          side: o.type || 'buy',
+          price: rawPrice,
+          qty: rawQty,
+          target_price: rawPrice,
+          order_date: nyDateStr || new Date().toISOString().slice(0, 10),
           status: 'simulated',
-          order_date: nyDateStr,
           order_response: {
             tossOrderRef: `TOSS_SERVER_${cycle.ticker}_${Date.now()}`,
             apiSource: 'server-route',

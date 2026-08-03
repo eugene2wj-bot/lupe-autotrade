@@ -81,6 +81,8 @@ export interface AutoOrder {
   side: 'buy' | 'sell';
   price: number;
   qty: number;
+  target_price?: number;
+  order_date?: string;
   status: 'pending' | 'submitted' | 'failed' | 'simulated';
   order_response?: any;
   created_at?: string;
