@@ -1,5 +1,6 @@
 // -------------------------------------------------------
 // 토스증권 API 서비스 브로커 (Toss Securities Broker)
+// 토스증권 공식 OpenAPI 3.1.0 스펙 기반 브로커 엔진
 // 🔒 보안 가드레일: 서버 전용 API Route (/api/auto-trade) 위임
 // -------------------------------------------------------
 
@@ -8,6 +9,7 @@ import type { Cycle, Order, TradeLog } from '@/types/cycle';
 export interface TossOrderResult {
   success: boolean;
   orderId?: string;
+  errorCode?: string;
   message?: string;
   rawResponse?: any;
 }
@@ -18,66 +20,220 @@ export interface TossOrderParams {
   accountNo: string;
   ticker: string;
   side: 'BUY' | 'SELL';
-  orderType: string;
+  orderType?: string;
   price: number; // 원화 센트 단위 (x100)
   qty: number;
+  clientOrderId?: string;
+}
+
+const TOSS_BASE_URL = 'https://openapi.tossinvest.com';
+
+/**
+ * 1. OAuth2 토큰 발급 API (POST /oauth2/token)
+ */
+export async function getTossAccessToken(appKey: string, appSecret: string): Promise<{
+  success: boolean;
+  accessToken?: string;
+  error?: string;
+  rawResponse?: any;
+}> {
+  try {
+    const url = `${TOSS_BASE_URL}/oauth2/token`;
+    const params = new URLSearchParams();
+    params.append('grant_type', 'client_credentials');
+    params.append('client_id', appKey.trim());
+    params.append('client_secret', appSecret.trim());
+
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+      },
+      body: params.toString(),
+    });
+
+    const data = await res.json().catch(() => ({}));
+    if (res.ok && (data.access_token || data.result?.access_token)) {
+      const token = data.access_token || data.result?.access_token;
+      return {
+        success: true,
+        accessToken: token,
+        rawResponse: data,
+      };
+    } else {
+      const errCode = data.error?.code || data.error || `HTTP_${res.status}`;
+      const errMsg = data.error?.message || data.error_description || data.message || `토스 OAuth2 토큰 발급 실패 (${res.status})`;
+      return {
+        success: false,
+        error: `${errCode}: ${errMsg}`,
+        rawResponse: data,
+      };
+    }
+  } catch (err: any) {
+    return {
+      success: false,
+      error: `토스 OAuth2 토큰 발급 통신 예외: ${err?.message || err}`,
+    };
+  }
 }
 
 /**
- * 토스증권 해외주식 LOC 매수/매도 API 직접 호출 헬퍼
+ * 2. 계좌 식별자(accountSeq) 자동 조회 API (GET /api/v1/accounts)
+ */
+export async function getTossAccountSeq(accessToken: string, targetAccountNo?: string): Promise<{
+  success: boolean;
+  accountSeq?: string | number;
+  error?: string;
+  rawResponse?: any;
+}> {
+  try {
+    const url = `${TOSS_BASE_URL}/api/v1/accounts`;
+    const res = await fetch(url, {
+      method: 'GET',
+      headers: {
+        'Authorization': `Bearer ${accessToken}`,
+      },
+    });
+
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      const errCode = data.error?.code || `HTTP_${res.status}`;
+      const errMsg = data.error?.message || data.message || `계좌 목록 조회 실패 (${res.status})`;
+      return {
+        success: false,
+        error: `${errCode}: ${errMsg}`,
+        rawResponse: data,
+      };
+    }
+
+    const accountsList = Array.isArray(data.result) ? data.result : (Array.isArray(data.accounts) ? data.accounts : (Array.isArray(data) ? data : []));
+    if (!accountsList || accountsList.length === 0) {
+      return {
+        success: false,
+        error: '등록된 토스증권 계좌(accountSeq)를 찾을 수 없습니다.',
+        rawResponse: data,
+      };
+    }
+
+    let matched = accountsList[0];
+    if (targetAccountNo) {
+      const targetClean = targetAccountNo.replace(/-/g, '');
+      const found = accountsList.find((a: any) => {
+        const noClean = String(a.accountNo || a.account_no || a.accountNumber || '').replace(/-/g, '');
+        return noClean && noClean.includes(targetClean);
+      });
+      if (found) matched = found;
+    }
+
+    const accountSeq = matched.accountSeq ?? matched.account_seq ?? matched.seq;
+    if (accountSeq === undefined || accountSeq === null) {
+      return {
+        success: false,
+        error: '계좌 응답에서 accountSeq 필드를 찾을 수 없습니다.',
+        rawResponse: data,
+      };
+    }
+
+    return {
+      success: true,
+      accountSeq,
+      rawResponse: data,
+    };
+  } catch (err: any) {
+    return {
+      success: false,
+      error: `계좌 목록 조회 통신 예외: ${err?.message || err}`,
+    };
+  }
+}
+
+/**
+ * 3. 미국 주식 LOC 매수/매도 주문 전송 API (POST /api/v1/orders)
  */
 export async function sendTossLocOrder(params: TossOrderParams): Promise<TossOrderResult> {
   try {
-    const url = 'https://openapi.tossinvest.com/v1/trading/orders/overseas';
-    const dollarsPrice = params.price > 0 ? (params.price / 100).toFixed(2) : undefined;
+    // 1) OAuth2 토큰 발급
+    const tokenRes = await getTossAccessToken(params.appKey, params.appSecret);
+    if (!tokenRes.success || !tokenRes.accessToken) {
+      return {
+        success: false,
+        errorCode: 'OAUTH2_TOKEN_FAILED',
+        message: tokenRes.error || 'OAuth2 토큰 발급 실패',
+        rawResponse: tokenRes.rawResponse,
+      };
+    }
+    const accessToken = tokenRes.accessToken;
+
+    // 2) 계좌 식별자(accountSeq) 조회
+    const accountRes = await getTossAccountSeq(accessToken, params.accountNo);
+    if (!accountRes.success || accountRes.accountSeq === undefined) {
+      return {
+        success: false,
+        errorCode: 'ACCOUNT_SEQ_FAILED',
+        message: accountRes.error || '계좌 식별자(accountSeq) 조회 실패',
+        rawResponse: accountRes.rawResponse,
+      };
+    }
+    const accountSeq = String(accountRes.accountSeq);
+
+    // 3) 미국 주식 LOC 매수 주문 전송
+    const url = `${TOSS_BASE_URL}/api/v1/orders`;
+    const dollarsPrice = params.price > 0 ? (params.price / 100).toFixed(2) : '0.00';
+    const clientOrderId = params.clientOrderId || `LUPE_${params.ticker}_${Date.now()}`;
 
     const bodyPayload = {
-      accountNo: params.accountNo,
-      ticker: params.ticker.toUpperCase(),
-      side: params.side,
-      orderType: params.orderType || 'LOC',
+      symbol: params.ticker.toUpperCase(),
+      side: params.side, // "BUY" | "SELL"
+      orderType: 'LIMIT',
+      timeInForce: 'CLS', // 미국 주식 종가 지정가(LOC) 필수 값
+      quantity: String(params.qty),
       price: dollarsPrice,
-      qty: params.qty,
+      clientOrderId: clientOrderId,
     };
 
     const res = await fetch(url, {
       method: 'POST',
       headers: {
+        'Authorization': `Bearer ${accessToken}`,
+        'X-Tossinvest-Account': accountSeq,
         'Content-Type': 'application/json',
-        'x-toss-app-key': params.appKey,
-        'x-toss-app-secret': params.appSecret,
-        'x-toss-account-no': params.accountNo,
       },
       body: JSON.stringify(bodyPayload),
     });
 
     const resData = await res.json().catch(() => ({}));
-    if (res.ok && (resData.success !== false && !resData.error)) {
+
+    // 4) 결과 검증: 200 OK & { result: { orderId: "..." } }
+    if (res.ok && (resData.result?.orderId || resData.orderId)) {
+      const orderId = resData.result?.orderId || resData.orderId;
       return {
         success: true,
-        orderId: resData.orderId || resData.orderRef || `TOSS_REAL_${params.ticker}_${Date.now()}`,
-        message: resData.message || '토스 API LOC 주문 성공',
+        orderId: String(orderId),
+        message: `토스 OpenAPI 3.1.0 주문 성공 (Order ID: ${orderId})`,
         rawResponse: resData,
       };
     } else {
-      const errMsg = resData.error?.message || resData.message || (typeof resData.error === 'string' ? resData.error : null) || `HTTP ${res.status} 토스 API 응답 오류`;
+      const errCode = resData.error?.code || resData.code || `HTTP_${res.status}`;
+      const errMsg = resData.error?.message || resData.message || `토스 API 주문 실패 (${res.status})`;
       return {
         success: false,
-        orderId: `TOSS_REAL_FAIL_${params.ticker}_${Date.now()}`,
-        message: errMsg,
+        errorCode: errCode,
+        orderId: `TOSS_FAIL_${params.ticker}_${Date.now()}`,
+        message: `${errCode}: ${errMsg}`,
         rawResponse: resData,
       };
     }
   } catch (err: any) {
     return {
       success: false,
-      message: err?.message || '토스 API 통신 오류',
+      errorCode: 'EXCEPTION',
+      message: `토스 API 통신 예외: ${err?.message || err}`,
     };
   }
 }
 
 /**
- * 1. [🧪 토스 API 가상 주문 테스트] 전송 컨트롤러
+ * 4. [🧪 토스 API 가상 주문 테스트] 전송 컨트롤러
  * - 보안 가드레일에 따라 서버 전용 API Route (/api/auto-trade)로 안전 위임
  * - Idempotency Lock (중복 주문 방지) 및 Circuit Breaker (1일 한도 1.5배) 서버 검증
  */
@@ -127,7 +283,7 @@ export async function submitSimulatedOrders(cycle: Cycle): Promise<{
 }
 
 /**
- * 2. [🔄 체결 기록 동기화 테스트] 컨트롤러
+ * 5. [🔄 체결 기록 동기화 테스트] 컨트롤러
  * - 서버 API Route (/api/auto-trade)를 통한 체결 동기화 및 텔레그램 리포팅
  */
 export async function syncExecutions(cycle: Cycle): Promise<{
@@ -169,4 +325,5 @@ export async function syncExecutions(cycle: Cycle): Promise<{
     };
   }
 }
+
 

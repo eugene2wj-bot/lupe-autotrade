@@ -217,7 +217,7 @@ async function executeOrdersForCycle(
       submittedOrders.push(o);
     }
 
-    const orderRecord = {
+    const orderRecord: any = {
       cycle_id: cycle.id || '',
       ticker: (cycle.ticker || '').toUpperCase(),
       order_type: o.orderType || 'star',
@@ -227,9 +227,11 @@ async function executeOrdersForCycle(
       target_price: rawPrice,
       order_date: nyDateStr || new Date().toISOString().slice(0, 10),
       status: orderStatus,
+      order_id: tossOrderRef,
       order_response: {
+        orderId: tossOrderRef,
         tossOrderRef,
-        apiSource: isRealToss ? 'toss-real-api' : 'server-route-simulated',
+        apiSource: isRealToss ? 'toss-openapi-v3.1.0' : 'server-route-simulated',
         nyTimeEt: nyTime.toLocaleString('en-US'),
         executedAt: new Date().toISOString(),
         tossResponse: tossResponseData,
@@ -243,10 +245,11 @@ async function executeOrdersForCycle(
       .select('*')
       .single();
 
-    if (orderInsErr && orderInsErr.message.includes('order_response')) {
-      console.warn('[AutoTradeAPI] order_response column missing in auto_orders. Retrying without order_response...');
-      const fallbackRecord = { ...orderRecord };
-      delete (fallbackRecord as any).order_response;
+    if (orderInsErr && (orderInsErr.message.includes('order_id') || orderInsErr.message.includes('order_response') || orderInsErr.code === 'PGRST204')) {
+      console.warn('[AutoTradeAPI] auto_orders column fallback retry:', orderInsErr.message);
+      const fallbackRecord: any = { ...orderRecord };
+      if (orderInsErr.message.includes('order_id')) delete fallbackRecord.order_id;
+      if (orderInsErr.message.includes('order_response')) delete fallbackRecord.order_response;
       const retryOrder = await supabaseAdmin
         .from('auto_orders')
         .insert(fallbackRecord)
