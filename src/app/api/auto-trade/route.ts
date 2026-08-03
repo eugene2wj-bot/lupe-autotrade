@@ -18,11 +18,303 @@ import {
   isWithinPreMarketOrderWindow,
 } from '@/utils/usMarketCalendar';
 import type { Cycle, TradeLog } from '@/types/cycle';
+import initialCyclesData from '@/data/cycles.json';
+
+/**
+ * 단일 사이클 자동 가상 주문 처리 헬퍼 함수
+ */
+async function executeOrdersForCycle(
+  cycle: Cycle,
+  is_global_auto_trade: boolean,
+  forceTest: boolean,
+  nyTime: Date,
+  nyDateStr: string,
+  todayStartIso: string
+) {
+  // 🟢 전역/개별 자동매매 활성화 검증
+  if (!is_global_auto_trade && !forceTest) {
+    return {
+      cycleId: cycle.id,
+      cycleName: cycle.name,
+      success: false,
+      error: '전역 자동매매 OFF',
+      message: '전역 자동매매가 OFF 상태입니다. 주문 생성이 차단되었습니다.',
+      count: 0,
+    };
+  }
+  if (!cycle.autoTradeEnabled && !forceTest) {
+    return {
+      cycleId: cycle.id,
+      cycleName: cycle.name,
+      success: false,
+      error: '개별 자동매매 OFF',
+      message: `[${cycle.name}] 사이클의 개별 자동매매가 OFF 상태입니다.`,
+      count: 0,
+    };
+  }
+
+  // 🛑 검증 A: 미국 증시 휴장일 및 주말 검증
+  const isMarketHoliday = isUsMarketHoliday(nyTime);
+  const isWeekendDay = isWeekend(nyTime);
+
+  if ((isMarketHoliday || isWeekendDay) && !forceTest) {
+    const reason = isWeekendDay ? '주말(토/일)' : '정기 휴장일';
+    await sendTelegramMessage(
+      `🏖️ <b>[미국 증시 휴장 알림]</b>\n\n` +
+        `사유: <b>${reason}</b>\n` +
+        `사이클: <b>${cycle.name} (${cycle.ticker})</b>\n` +
+        `뉴욕 현지 시각: <b>${nyTime.toLocaleString('en-US')} ET</b>\n\n` +
+        `오늘은 미국 증시가 열리지 않으므로 자동 주문 제출을 <b>안전하게 스킵</b>합니다.`
+    );
+
+    return {
+      cycleId: cycle.id,
+      cycleName: cycle.name,
+      success: false,
+      isMarketClosed: true,
+      error: `미국 증시 휴장일(${reason})`,
+      message: `🏖️ 오늘은 미국 증시 휴장일(${reason})입니다. 주문을 스킵합니다.`,
+      count: 0,
+    };
+  }
+
+  // 🛑 검증 B: 미국 현지 시간대 검증 (장전 08:30 ~ 09:30 ET)
+  const isInWindow = isWithinPreMarketOrderWindow(nyTime);
+  if (!isInWindow && !forceTest) {
+    return {
+      cycleId: cycle.id,
+      cycleName: cycle.name,
+      success: false,
+      isOutsideWindow: true,
+      error: '미국 장전 시간대 아님',
+      message: `⏳ 미국 현지 장전 주문 시각(08:30 ~ 09:30 ET)이 아닙니다. (현재: ${nyTime.toLocaleTimeString('en-US')} ET)`,
+      count: 0,
+    };
+  }
+
+  // 🛑 검증 C: 중복 주문 락 (Idempotency Lock)
+  const { data: existingOrders } = await supabaseAdmin
+    .from('auto_orders')
+    .select('*')
+    .eq('cycle_id', cycle.id)
+    .gte('created_at', todayStartIso);
+
+  const hasActiveOrderToday = (existingOrders || []).some((o: any) =>
+    ['pending', 'submitted', 'simulated', 'filled'].includes(o.status)
+  );
+
+  if (hasActiveOrderToday && !forceTest) {
+    return {
+      cycleId: cycle.id,
+      cycleName: cycle.name,
+      success: false,
+      error: '중복 주문 방지 Lock',
+      message: `🛑 [중복 주문 방지 Lock] 오늘(${nyDateStr} ET) [${cycle.name}] 사이클에 이미 제출된 주문이 존재합니다.`,
+      count: 0,
+    };
+  }
+
+  // 가이드 주문 생성
+  const { orders } = generateGuide(cycle);
+  const stats = calcCycleStats(cycle);
+
+  if (!orders || orders.length === 0) {
+    return {
+      cycleId: cycle.id,
+      cycleName: cycle.name,
+      success: true,
+      orders: [],
+      count: 0,
+      message: `[${cycle.name}] 생성된 가이드 주문이 없습니다.`,
+    };
+  }
+
+  // 🛑 Circuit Breaker: 1일 주문 한도 제한 (perBuyAmount의 1.5배)
+  const totalBuyOrderAmountCents = orders
+    .filter((o) => o.type === 'buy')
+    .reduce((sum, o) => sum + (o.price > 0 ? o.price : stats.avgPrice) * o.qty, 0);
+
+  const maxAllowedOrderAmountCents = stats.perBuyAmount * 1.5;
+
+  if (totalBuyOrderAmountCents > maxAllowedOrderAmountCents && !forceTest) {
+    const attemptedDollars = (totalBuyOrderAmountCents / 100).toFixed(2);
+    const limitDollars = (maxAllowedOrderAmountCents / 100).toFixed(2);
+
+    await sendTelegramMessage(
+      `🚨 <b>[Circuit Breaker 발동 경고]</b>\n\n` +
+        `사이클: <b>${cycle.name} (${cycle.ticker})</b>\n` +
+        `시도된 주문 총액: <b>$${attemptedDollars}</b>\n` +
+        `1일 허용 한도(1.5배): <b>$${limitDollars}</b>\n\n` +
+        `⚠️ 1일 매수 주문 한도를 초과하여 주문 전량이 <b>자동 차단</b>되었습니다.`
+    );
+
+    return {
+      cycleId: cycle.id,
+      cycleName: cycle.name,
+      success: false,
+      error: 'Circuit Breaker 발동',
+      message: `🚨 Circuit Breaker 발동: 당일 매수 주문액($${attemptedDollars})이 1일 한도($${limitDollars})를 초과하여 주문이 차단되었습니다.`,
+      count: 0,
+    };
+  }
+
+  // 🟢 auto_orders DB 저장 (정형화된 필드 규격 준수 & undefined ➔ 기본값 변환)
+  const createdOrderRecords: any[] = [];
+  for (const o of orders) {
+    const rawPrice = typeof o.price === 'number' ? o.price : 0;
+    const rawQty = typeof o.qty === 'number' ? o.qty : 0;
+
+    const orderRecord = {
+      cycle_id: cycle.id || '',
+      ticker: (cycle.ticker || '').toUpperCase(),
+      order_type: o.orderType || 'star',
+      side: o.type || 'buy',
+      price: rawPrice,
+      qty: rawQty,
+      target_price: rawPrice,
+      order_date: nyDateStr || new Date().toISOString().slice(0, 10),
+      status: 'simulated',
+      order_response: {
+        tossOrderRef: `TOSS_SERVER_${cycle.ticker}_${Date.now()}`,
+        apiSource: 'server-route',
+        nyTimeEt: nyTime.toLocaleString('en-US'),
+        executedAt: new Date().toISOString(),
+      },
+      created_at: new Date().toISOString(),
+    };
+
+    let { data: inserted, error: orderInsErr } = await supabaseAdmin
+      .from('auto_orders')
+      .insert(orderRecord)
+      .select('*')
+      .single();
+
+    // auto_orders 테이블 스키마에 order_response 컬럼이 존재하지 않는 경우 폴백 처리
+    if (orderInsErr && orderInsErr.message.includes('order_response')) {
+      console.warn('[AutoTradeAPI] order_response column missing in auto_orders. Retrying without order_response...');
+      const fallbackRecord = { ...orderRecord };
+      delete (fallbackRecord as any).order_response;
+      const retryOrder = await supabaseAdmin
+        .from('auto_orders')
+        .insert(fallbackRecord)
+        .select('*')
+        .single();
+      inserted = retryOrder.data;
+      orderInsErr = retryOrder.error;
+    }
+
+    if (orderInsErr) {
+      console.error('[AutoTradeAPI] auto_orders insert failed:', orderInsErr);
+      return {
+        cycleId: cycle.id,
+        cycleName: cycle.name,
+        success: false,
+        error: `DB 저장 실패: ${orderInsErr.message}`,
+        message: `🔴 DB 저장 실패: auto_orders 테이블 저장 중 오류가 발생했습니다. (${orderInsErr.message})`,
+        count: 0,
+      };
+    }
+
+    if (inserted) {
+      createdOrderRecords.push(inserted);
+    }
+  }
+
+  // 🟢 텔레그램 주문 제출 알림 발송 (명시적 에러 체크)
+  const tgResult = await notifyOrdersSubmittedDetailed(cycle.name, orders);
+  if (!tgResult.success) {
+    console.warn('[AutoTradeAPI] Telegram notification failed:', tgResult.error);
+    return {
+      cycleId: cycle.id,
+      cycleName: cycle.name,
+      success: false,
+      error: `텔레그램 발송 실패: ${tgResult.error}`,
+      message: `🔴 텔레그램 오류: ${tgResult.error}`,
+      count: orders.length,
+    };
+  }
+
+  return {
+    cycleId: cycle.id,
+    cycleName: cycle.name,
+    success: true,
+    orders,
+    count: orders.length,
+    message: `[${cycle.name}] 가상 주문 ${orders.length}건이 안전하게 DB에 저장되고 텔레그램으로 알림이 발송되었습니다.`,
+  };
+}
+
+/**
+ * 단일 사이클 체결 기록 동기화 헬퍼 함수
+ */
+async function syncExecutionsForCycle(cycle: Cycle, nyDateStr: string) {
+  const { orders } = generateGuide(cycle);
+  const buyOrders = orders.filter((o) => o.type === 'buy').slice(0, 2);
+  const newLogs: TradeLog[] = [];
+
+  for (const o of buyOrders) {
+    const logPayload = {
+      id: crypto.randomUUID(),
+      cycle_id: cycle.id,
+      date: nyDateStr,
+      type: 'buy',
+      order_type: o.orderType,
+      price: o.price > 0 ? o.price : Math.round(calcCycleStats(cycle).avgPrice),
+      qty: o.qty,
+      memo: '토스 API 서버 체결 동기화',
+      profit: null,
+      commission_rate: cycle.commissionRate,
+      batch_id: crypto.randomUUID(),
+    };
+
+    const { error: logErr } = await supabaseAdmin
+      .from('trade_logs')
+      .upsert(logPayload);
+
+    if (logErr) {
+      console.error('[AutoTradeAPI] trade_logs upsert error:', logErr);
+      return {
+        cycleId: cycle.id,
+        cycleName: cycle.name,
+        success: false,
+        error: `trade_logs DB 저장 실패: ${logErr.message}`,
+        message: `🔴 DB 저장 실패: trade_logs 갱신 실패 (${logErr.message})`,
+      };
+    }
+
+    newLogs.push({
+      id: logPayload.id,
+      cycleId: logPayload.cycle_id,
+      date: logPayload.date,
+      type: 'buy',
+      orderType: logPayload.order_type,
+      price: logPayload.price,
+      qty: logPayload.qty,
+      memo: logPayload.memo,
+      profit: logPayload.profit,
+      commissionRate: logPayload.commission_rate,
+      batchId: logPayload.batch_id,
+    });
+  }
+
+  // 🟢 텔레그램 체결 동기화 알림 발송
+  await notifyExecutionSync(cycle.name, newLogs);
+
+  return {
+    cycleId: cycle.id,
+    cycleName: cycle.name,
+    success: true,
+    newLogs,
+    count: newLogs.length,
+    message: `[${cycle.name}] 체결 기록 ${newLogs.length}건이 DB에 갱신되고 텔레그램 알림이 발송되었습니다.`,
+  };
+}
 
 export async function POST(request: Request) {
   try {
     const body = await request.json();
-    const { action, cycleId, cycleName, cycle: clientCycle, forceTest } = body;
+    const { action, cycleId, cycleName, cycle: clientCycle, forceTest: bodyForceTest, force } = body;
+    const forceTest = Boolean(bodyForceTest || force);
 
     // ── 0. PIN 번호 검증 및 변경 액션 (`VERIFY_PIN`, `CHANGE_PIN`, `GET_SETTINGS`) ───────────
     if (action === 'VERIFY_PIN') {
@@ -39,7 +331,6 @@ export async function POST(request: Request) {
 
       console.log(`[AutoTradeAPI VERIFY_PIN] inputPin: ${inputPin}, dbPin: ${dbPin}, validPin: ${validPin}`);
 
-      // 엄격한 PIN 검증: DB에 저장된 PIN 번호(validPin)와 100% 일치할 때만 승인
       if (inputPin === validPin) {
         return NextResponse.json({ success: true, message: 'PIN 번호 인증 성공' });
       } else {
@@ -134,7 +425,6 @@ export async function POST(request: Request) {
     if (action === 'SAVE_SETTINGS' || action === 'save-settings') {
       const src = body.settings || body || {};
 
-      // 기존 DB에 저장된 app_settings 행 조회 (기존 값 보존 방어 로직)
       const { data: existingSettings } = await supabaseAdmin
         .from('app_settings')
         .select('*')
@@ -152,7 +442,6 @@ export async function POST(request: Request) {
 
       let targetId: any = existingSettings?.id ?? src.id ?? 1;
 
-      // 비어있거나 누락된 경우 기존 DB 값 보존
       const payload: any = {
         id: targetId,
         is_global_auto_trade: is_global_auto_trade !== undefined ? is_global_auto_trade : (existingSettings?.is_global_auto_trade ?? false),
@@ -166,14 +455,12 @@ export async function POST(request: Request) {
         updated_at: new Date().toISOString(),
       };
 
-      // Service Role Key 기반 DB Upsert (RLS 우회)
       let { data: savedData, error: saveErr } = await supabaseAdmin
         .from('app_settings')
         .upsert(payload)
         .select('*')
         .single();
 
-      // 만약 integer 타입 에러 발생 시 id를 숫자 1로 변환하여 폴백 재시도
       if (saveErr && (saveErr.message.includes('integer') || saveErr.code === '22P02')) {
         console.warn('[AutoTradeAPI] ID integer syntax error. Retrying with numeric id: 1...');
         payload.id = 1;
@@ -186,7 +473,6 @@ export async function POST(request: Request) {
         saveErr = retryInt.error;
       }
 
-      // pin_code 컬럼 미존재 시 폴백 처리
       if (saveErr && saveErr.message.includes('pin_code')) {
         console.warn('[AutoTradeAPI] pin_code column missing in DB. Retrying without pin_code field...');
         delete payload.pin_code;
@@ -199,7 +485,6 @@ export async function POST(request: Request) {
         saveErr = retry.error;
       }
 
-      // auto_trade_time 컬럼이 Supabase DB 스키마에 존재하지 않는 경우 폴백 처리
       if (saveErr && saveErr.message.includes('auto_trade_time')) {
         console.warn('[AutoTradeAPI] auto_trade_time column missing in DB. Retrying without auto_trade_time field...');
         const fallbackPayload = { ...payload };
@@ -232,7 +517,7 @@ export async function POST(request: Request) {
       });
     }
 
-    // ── 2. app_settings 서버 단 조회 (SERVICE_ROLE_KEY 사용 - ID 무관 첫 행 조회) ────────────────
+    // ── 2. app_settings 서버 단 조회 (SERVICE_ROLE_KEY 사용) ────────────────
     const { data: settings, error: settingsErr } = await supabaseAdmin
       .from('app_settings')
       .select('*')
@@ -277,152 +562,122 @@ export async function POST(request: Request) {
       return NextResponse.json({ success: true, message: '자동매매 스위치 상태가 DB에 성공적으로 저장되었습니다.' });
     }
 
-    // ── 4. cycleId / cycleName 필수 액션 검증 ────────────────────────────
-    if (!cycleId && !cycleName && !clientCycle) {
-      return NextResponse.json(
-        { success: false, error: 'cycleId 파라미터 누락', message: 'cycleId 또는 cycle 객체 파라미터가 누락되었습니다.' },
-        { status: 400 }
-      );
-    }
+    // 미국 동부시간 (ET, 서머타임 자동 반영)
+    const nyTime = getNyseTime();
+    const nyDateStr = `${nyTime.getFullYear()}-${String(nyTime.getMonth() + 1).padStart(2, '0')}-${String(nyTime.getDate()).padStart(2, '0')}`;
+    const todayStartIso = `${nyDateStr}T00:00:00.000Z`;
 
-    // DB에서 대상 사이클 조회 (3단계 폴백 및 자동 Upsert)
-    let cycleRow: any = null;
+    const isTradeAction = ['EXECUTE_DAILY_TRADE', 'EXECUTE_ALL', 'submit-orders', 'place-orders'].includes(action);
+    const isSyncAction = action === 'sync-executions';
 
-    // 1) id 기반 조회
-    if (cycleId) {
-      const { data } = await supabaseAdmin
-        .from('cycles')
-        .select('*')
-        .eq('id', cycleId)
-        .maybeSingle();
-      cycleRow = data;
-    }
-
-    // 2) name 기반 재조회 (id 조회 실패 시)
-    if (!cycleRow && (cycleName || clientCycle?.name)) {
-      const targetName = cycleName || clientCycle?.name;
-      const { data } = await supabaseAdmin
-        .from('cycles')
-        .select('*')
-        .eq('name', targetName)
-        .maybeSingle();
-      cycleRow = data;
-    }
-
-    // 3) DB에 전혀 없다면 전달받은 clientCycle 기반으로 DB 즉시 Upsert(생성)
-    if (!cycleRow && clientCycle) {
-      console.log(`[AutoTradeAPI] Auto-upserting cycle to DB: ${clientCycle.name} (${clientCycle.id})`);
-      const payload = {
-        id: clientCycle.id || cycleId || crypto.randomUUID(),
-        name: clientCycle.name,
-        ticker: clientCycle.ticker,
-        version: clientCycle.version,
-        split_count: clientCycle.splitCount ?? 40,
-        max_percent: clientCycle.maxPercent ?? 20,
-        principal: clientCycle.principal ?? 0,
-        compound_mode: clientCycle.compoundMode ?? null,
-        status: clientCycle.status ?? 'active',
-        start_date: clientCycle.startDate,
-        commission_rate: clientCycle.commissionRate ?? 0.1,
-        auto_trade_enabled: clientCycle.autoTradeEnabled ?? true,
-        updated_at: new Date().toISOString(),
-      };
-
-      let { data: newRow, error: upsertErr } = await supabaseAdmin
-        .from('cycles')
-        .upsert(payload)
-        .select('*')
-        .single();
-
-      // cycles 테이블 스키마에 특정 컬럼(start_date 등)이 존재하지 않는 경우 폴백 재시도
-      if (upsertErr && (upsertErr.message.includes('schema cache') || upsertErr.code === 'PGRST204')) {
-        console.warn('[AutoTradeAPI] cycles upsert initial schema warning:', upsertErr.message);
-        const fallbackPayload: any = { ...payload };
-
-        if (upsertErr.message.includes('start_date')) delete fallbackPayload.start_date;
-        if (upsertErr.message.includes('compound_mode')) delete fallbackPayload.compound_mode;
-        if (upsertErr.message.includes('auto_trade_enabled')) delete fallbackPayload.auto_trade_enabled;
-        if (upsertErr.message.includes('split_count')) delete fallbackPayload.split_count;
-        if (upsertErr.message.includes('max_percent')) delete fallbackPayload.max_percent;
-        if (upsertErr.message.includes('commission_rate')) delete fallbackPayload.commission_rate;
-        if (upsertErr.message.includes('updated_at')) delete fallbackPayload.updated_at;
-
-        const retry = await supabaseAdmin
-          .from('cycles')
-          .upsert(fallbackPayload)
-          .select('*')
-          .single();
-        newRow = retry.data;
-        upsertErr = retry.error;
-      }
-
-      if (upsertErr) {
-        console.error('[AutoTradeAPI] cycles upsert error:', upsertErr);
-        return NextResponse.json(
-          {
-            success: false,
-            error: `cycles DB 저장 실패: ${upsertErr.message}`,
-            message: `🔴 DB 저장 실패: ${upsertErr.message}`,
-          },
-          { status: 500 }
-        );
-      }
-
-      if (newRow) {
-        cycleRow = newRow;
-
-        if (clientCycle.logs && clientCycle.logs.length > 0) {
-          const logsPayload = clientCycle.logs.map((l: TradeLog) => ({
-            id: l.id,
-            cycle_id: newRow.id,
-            date: l.date,
-            type: l.type,
-            order_type: l.orderType,
-            price: l.price,
-            qty: l.qty,
-            memo: l.memo,
-            profit: l.profit,
-            commission_rate: l.commissionRate,
-            batch_id: l.batchId,
-          }));
-          await supabaseAdmin.from('trade_logs').upsert(logsPayload);
+    // ── 4. 자동매매 / 주문 생성 실행 ────────────────────────────
+    if (isTradeAction) {
+      // A) cycleId / cycleName / clientCycle 이 지정된 경우 단일 사이클 수행
+      if (cycleId || cycleName || clientCycle) {
+        let cycleRow: any = null;
+        if (cycleId) {
+          const { data } = await supabaseAdmin.from('cycles').select('*').eq('id', cycleId).maybeSingle();
+          cycleRow = data;
         }
+        if (!cycleRow && (cycleName || clientCycle?.name)) {
+          const targetName = cycleName || clientCycle?.name;
+          const { data } = await supabaseAdmin.from('cycles').select('*').eq('name', targetName).maybeSingle();
+          cycleRow = data;
+        }
+
+        const targetCycleId = cycleRow?.id || clientCycle?.id || cycleId;
+        const { data: dbLogs } = await supabaseAdmin
+          .from('trade_logs')
+          .select('*')
+          .eq('cycle_id', targetCycleId)
+          .order('date', { ascending: true });
+
+        const logs: TradeLog[] = (dbLogs && dbLogs.length > 0)
+          ? dbLogs.map((row: any) => ({
+              id: row.id,
+              cycleId: row.cycle_id,
+              date: row.date,
+              type: row.type,
+              orderType: row.order_type,
+              price: row.price,
+              qty: row.qty,
+              memo: row.memo,
+              profit: row.profit,
+              commissionRate: row.commission_rate ?? 0.1,
+              batchId: row.batch_id || row.id,
+            }))
+          : (clientCycle?.logs || []);
+
+        const cycle: Cycle = cycleRow
+          ? {
+              id: cycleRow.id,
+              name: cycleRow.name,
+              ticker: cycleRow.ticker,
+              version: cycleRow.version,
+              splitCount: cycleRow.split_count ?? 40,
+              maxPercent: cycleRow.max_percent ?? 20,
+              principal: cycleRow.principal ?? 0,
+              compoundMode: cycleRow.compound_mode ?? null,
+              status: cycleRow.status ?? 'active',
+              startDate: cycleRow.start_date,
+              commissionRate: cycleRow.commission_rate ?? 0.1,
+              autoTradeEnabled: cycleRow.auto_trade_enabled ?? cycleRow.is_auto_trade_enabled ?? true,
+              logs,
+            }
+          : clientCycle!;
+
+        const result = await executeOrdersForCycle(cycle, is_global_auto_trade, forceTest, nyTime, nyDateStr, todayStartIso);
+        return NextResponse.json(result, { status: result.success ? 200 : 400 });
       }
-    }
 
-    if (!cycleRow && !clientCycle) {
-      return NextResponse.json(
-        { success: false, error: '사이클 미존재', message: '해당 사이클을 DB에서 찾을 수 없습니다.' },
-        { status: 404 }
-      );
-    }
+      // B) cycleId가 없는 경우 DB cycles 테이블에서 is_auto_trade_enabled = true 인 모든 활성 사이클 일괄 수행
+      let { data: dbCycles } = await supabaseAdmin.from('cycles').select('*');
+      if (!dbCycles || dbCycles.length === 0) {
+        dbCycles = initialCyclesData as any[];
+      }
 
-    // DB logs 조회
-    const targetCycleId = cycleRow?.id || clientCycle?.id;
-    const { data: dbLogs } = await supabaseAdmin
-      .from('trade_logs')
-      .select('*')
-      .eq('cycle_id', targetCycleId)
-      .order('date', { ascending: true });
+      const activeCycles = (dbCycles || []).filter((c: any) => {
+        const isActive = !c.status || c.status === 'active';
+        const isAutoEnabled = (c.is_auto_trade_enabled ?? c.auto_trade_enabled ?? c.autoTradeEnabled) !== false;
+        return isActive && isAutoEnabled;
+      });
 
-    const logs: TradeLog[] = (dbLogs && dbLogs.length > 0)
-      ? dbLogs.map((row: any) => ({
-          id: row.id,
-          cycleId: row.cycle_id,
-          date: row.date,
-          type: row.type,
-          orderType: row.order_type,
-          price: row.price,
-          qty: row.qty,
-          memo: row.memo,
-          profit: row.profit,
-          commissionRate: row.commission_rate ?? 0.1,
-          batchId: row.batch_id || row.id,
-        }))
-      : (clientCycle?.logs || []);
+      if (activeCycles.length === 0) {
+        return NextResponse.json({
+          success: true,
+          message: '자동매매가 활성화된(is_auto_trade_enabled = true) 대상 사이클이 없습니다.',
+          totalCycles: 0,
+          successCount: 0,
+          totalOrders: 0,
+          results: [],
+        });
+      }
 
-    const cycle: Cycle = cycleRow
-      ? {
+      const results = [];
+      for (const cycleRow of activeCycles) {
+        const { data: dbLogs } = await supabaseAdmin
+          .from('trade_logs')
+          .select('*')
+          .eq('cycle_id', cycleRow.id)
+          .order('date', { ascending: true });
+
+        const logs: TradeLog[] = (dbLogs && dbLogs.length > 0)
+          ? dbLogs.map((row: any) => ({
+              id: row.id,
+              cycleId: row.cycle_id,
+              date: row.date,
+              type: row.type,
+              orderType: row.order_type,
+              price: row.price,
+              qty: row.qty,
+              memo: row.memo,
+              profit: row.profit,
+              commissionRate: row.commission_rate ?? 0.1,
+              batchId: row.batch_id || row.id,
+            }))
+          : [];
+
+        const cycleObj: Cycle = {
           id: cycleRow.id,
           name: cycleRow.name,
           ticker: cycleRow.ticker,
@@ -434,261 +689,143 @@ export async function POST(request: Request) {
           status: cycleRow.status ?? 'active',
           startDate: cycleRow.start_date,
           commissionRate: cycleRow.commission_rate ?? 0.1,
-          autoTradeEnabled: cycleRow.auto_trade_enabled ?? true,
+          autoTradeEnabled: cycleRow.auto_trade_enabled ?? cycleRow.is_auto_trade_enabled ?? true,
           logs,
-        }
-      : clientCycle!;
-
-    // 미국 동부시간 (ET, 서머타임 자동 반영)
-    const nyTime = getNyseTime();
-    const nyDateStr = `${nyTime.getFullYear()}-${String(nyTime.getMonth() + 1).padStart(2, '0')}-${String(nyTime.getDate()).padStart(2, '0')}`;
-    const todayStartIso = `${nyDateStr}T00:00:00.000Z`;
-
-    // ───────────────────────────────────────────────────────
-    // C. 가상/실전 주문 제출 (`submit-orders` 또는 `place-orders`)
-    // ───────────────────────────────────────────────────────
-    if (action === 'submit-orders' || action === 'place-orders') {
-      // 🟢 전역/개별 자동매매 활성화 검증
-      if (!is_global_auto_trade && !forceTest) {
-        return NextResponse.json({
-          success: false,
-          error: '전역 자동매매 OFF',
-          message: '전역 자동매매가 OFF 상태입니다. 주문 생성이 차단되었습니다.',
-        });
-      }
-      if (!cycle.autoTradeEnabled && !forceTest) {
-        return NextResponse.json({
-          success: false,
-          error: '개별 자동매매 OFF',
-          message: `[${cycle.name}] 사이클의 개별 자동매매가 OFF 상태입니다.`,
-        });
-      }
-
-      // 🛑 검증 A: 미국 증시 휴장일 및 주말 검증
-      const isMarketHoliday = isUsMarketHoliday(nyTime);
-      const isWeekendDay = isWeekend(nyTime);
-
-      if ((isMarketHoliday || isWeekendDay) && !forceTest) {
-        const reason = isWeekendDay ? '주말(토/일)' : '정기 휴장일';
-        await sendTelegramMessage(
-          `🏖️ <b>[미국 증시 휴장 알림]</b>\n\n` +
-            `사유: <b>${reason}</b>\n` +
-            `사이클: <b>${cycle.name} (${cycle.ticker})</b>\n` +
-            `뉴욕 현지 시각: <b>${nyTime.toLocaleString('en-US')} ET</b>\n\n` +
-            `오늘은 미국 증시가 열리지 않으므로 자동 주문 제출을 <b>안전하게 스킵</b>합니다.`
-        );
-
-        return NextResponse.json({
-          success: false,
-          isMarketClosed: true,
-          error: `미국 증시 휴장일(${reason})`,
-          message: `🏖️ 오늘은 미국 증시 휴장일(${reason})입니다. 주문을 스킵합니다.`,
-        });
-      }
-
-      // 🛑 검증 B: 미국 현지 시간대 검증 (장전 08:30 ~ 09:30 ET)
-      const isInWindow = isWithinPreMarketOrderWindow(nyTime);
-      if (!isInWindow && !forceTest) {
-        return NextResponse.json({
-          success: false,
-          isOutsideWindow: true,
-          error: '미국 장전 시간대 아님',
-          message: `⏳ 미국 현지 장전 주문 시각(08:30 ~ 09:30 ET)이 아닙니다. (현재: ${nyTime.toLocaleTimeString('en-US')} ET)`,
-        });
-      }
-
-      // 🛑 검증 C: 중복 주문 락 (Idempotency Lock)
-      const { data: existingOrders } = await supabaseAdmin
-        .from('auto_orders')
-        .select('*')
-        .eq('cycle_id', cycle.id)
-        .gte('created_at', todayStartIso);
-
-      const hasActiveOrderToday = (existingOrders || []).some((o: any) =>
-        ['pending', 'submitted', 'simulated', 'filled'].includes(o.status)
-      );
-
-      if (hasActiveOrderToday && !forceTest) {
-        return NextResponse.json({
-          success: false,
-          error: '중복 주문 방지 Lock',
-          message: `🛑 [중복 주문 방지 Lock] 오늘(${nyDateStr} ET) [${cycle.name}] 사이클에 이미 제출된 주문이 존재합니다.`,
-        });
-      }
-
-      // 가이드 주문 생성
-      const { orders } = generateGuide(cycle);
-      const stats = calcCycleStats(cycle);
-
-      // 🛑 Circuit Breaker: 1일 주문 한도 제한 (perBuyAmount의 1.5배)
-      const totalBuyOrderAmountCents = orders
-        .filter((o) => o.type === 'buy')
-        .reduce((sum, o) => sum + (o.price > 0 ? o.price : stats.avgPrice) * o.qty, 0);
-
-      const maxAllowedOrderAmountCents = stats.perBuyAmount * 1.5;
-
-      if (totalBuyOrderAmountCents > maxAllowedOrderAmountCents && !forceTest) {
-        const attemptedDollars = (totalBuyOrderAmountCents / 100).toFixed(2);
-        const limitDollars = (maxAllowedOrderAmountCents / 100).toFixed(2);
-
-        await sendTelegramMessage(
-          `🚨 <b>[Circuit Breaker 발동 경고]</b>\n\n` +
-            `사이클: <b>${cycle.name} (${cycle.ticker})</b>\n` +
-            `시도된 주문 총액: <b>$${attemptedDollars}</b>\n` +
-            `1일 허용 한도(1.5배): <b>$${limitDollars}</b>\n\n` +
-            `⚠️ 1일 매수 주문 한도를 초과하여 주문 전량이 <b>자동 차단</b>되었습니다.`
-        );
-
-        return NextResponse.json({
-          success: false,
-          error: 'Circuit Breaker 발동',
-          message: `🚨 Circuit Breaker 발동: 당일 매수 주문액($${attemptedDollars})이 1일 한도($${limitDollars})를 초과하여 주문이 차단되었습니다.`,
-        });
-      }
-
-      // 🟢 auto_orders DB 저장 (정형화된 필드 규격 준수 & undefined ➔ 기본값 변환)
-      const createdOrderRecords: any[] = [];
-      for (const o of orders) {
-        const rawPrice = typeof o.price === 'number' ? o.price : 0;
-        const rawQty = typeof o.qty === 'number' ? o.qty : 0;
-
-        const orderRecord = {
-          cycle_id: cycle.id || '',
-          ticker: (cycle.ticker || '').toUpperCase(),
-          order_type: o.orderType || 'star',
-          side: o.type || 'buy',
-          price: rawPrice,
-          qty: rawQty,
-          target_price: rawPrice,
-          order_date: nyDateStr || new Date().toISOString().slice(0, 10),
-          status: 'simulated',
-          order_response: {
-            tossOrderRef: `TOSS_SERVER_${cycle.ticker}_${Date.now()}`,
-            apiSource: 'server-route',
-            nyTimeEt: nyTime.toLocaleString('en-US'),
-            executedAt: new Date().toISOString(),
-          },
-          created_at: new Date().toISOString(),
         };
 
-        let { data: inserted, error: orderInsErr } = await supabaseAdmin
-          .from('auto_orders')
-          .insert(orderRecord)
-          .select('*')
-          .single();
-
-        // auto_orders 테이블 스키마에 order_response 컬럼이 존재하지 않는 경우 폴백 처리
-        if (orderInsErr && orderInsErr.message.includes('order_response')) {
-          console.warn('[AutoTradeAPI] order_response column missing in auto_orders. Retrying without order_response...');
-          const fallbackRecord = { ...orderRecord };
-          delete (fallbackRecord as any).order_response;
-          const retryOrder = await supabaseAdmin
-            .from('auto_orders')
-            .insert(fallbackRecord)
-            .select('*')
-            .single();
-          inserted = retryOrder.data;
-          orderInsErr = retryOrder.error;
-        }
-
-        if (orderInsErr) {
-          console.error('[AutoTradeAPI] auto_orders insert failed:', orderInsErr);
-          return NextResponse.json(
-            {
-              success: false,
-              error: `DB 저장 실패: ${orderInsErr.message}`,
-              message: `🔴 DB 저장 실패: auto_orders 테이블 저장 중 오류가 발생했습니다. (${orderInsErr.message})`,
-            },
-            { status: 500 }
-          );
-        }
-
-        if (inserted) {
-          createdOrderRecords.push(inserted);
-        }
+        const res = await executeOrdersForCycle(cycleObj, is_global_auto_trade, forceTest, nyTime, nyDateStr, todayStartIso);
+        results.push(res);
       }
 
-      // 🟢 텔레그램 주문 제출 알림 발송 (명시적 에러 체크)
-      const tgResult = await notifyOrdersSubmittedDetailed(cycle.name, orders);
-      if (!tgResult.success) {
-        console.warn('[AutoTradeAPI] Telegram notification failed:', tgResult.error);
-        return NextResponse.json({
-          success: false,
-          error: `텔레그램 발송 실패: ${tgResult.error}`,
-          message: `🔴 텔레그램 오류: ${tgResult.error}`,
-        }, { status: 400 });
-      }
+      const successCount = results.filter((r) => r.success).length;
+      const totalOrders = results.reduce((sum, r) => sum + (r.count || 0), 0);
 
       return NextResponse.json({
         success: true,
-        orders,
-        count: orders.length,
-        message: `[${cycle.name}] 가상 주문 ${orders.length}건이 안전하게 DB에 저장되고 텔레그램으로 알림이 발송되었습니다.`,
+        message: `전체 ${activeCycles.length}개 활성 사이클 중 ${successCount}개 사이클 자동주문 완료 (총 ${totalOrders}건 생성)`,
+        totalCycles: activeCycles.length,
+        successCount,
+        totalOrders,
+        results,
       });
     }
 
-    // ───────────────────────────────────────────────────────
-    // D. 체결 기록 동기화 (`sync-executions`)
-    // ───────────────────────────────────────────────────────
-    if (action === 'sync-executions') {
-      const { orders } = generateGuide(cycle);
-      const buyOrders = orders.filter((o) => o.type === 'buy').slice(0, 2);
-      const newLogs: TradeLog[] = [];
-
-      for (const o of buyOrders) {
-        const logPayload = {
-          id: crypto.randomUUID(),
-          cycle_id: cycle.id,
-          date: nyDateStr,
-          type: 'buy',
-          order_type: o.orderType,
-          price: o.price > 0 ? o.price : Math.round(calcCycleStats(cycle).avgPrice),
-          qty: o.qty,
-          memo: '토스 API 서버 체결 동기화',
-          profit: null,
-          commission_rate: cycle.commissionRate,
-          batch_id: crypto.randomUUID(),
-        };
-
-        const { error: logErr } = await supabaseAdmin
-          .from('trade_logs')
-          .upsert(logPayload);
-
-        if (logErr) {
-          console.error('[AutoTradeAPI] trade_logs upsert error:', logErr);
-          return NextResponse.json(
-            {
-              success: false,
-              error: `trade_logs DB 저장 실패: ${logErr.message}`,
-              message: `🔴 DB 저장 실패: trade_logs 갱신 실패 (${logErr.message})`,
-            },
-            { status: 500 }
-          );
+    // ── 5. 체결 내역 동기화 실행 ────────────────────────────
+    if (isSyncAction) {
+      if (cycleId || cycleName || clientCycle) {
+        let cycleRow: any = null;
+        if (cycleId) {
+          const { data } = await supabaseAdmin.from('cycles').select('*').eq('id', cycleId).maybeSingle();
+          cycleRow = data;
         }
+        const targetCycleId = cycleRow?.id || clientCycle?.id || cycleId;
+        const { data: dbLogs } = await supabaseAdmin
+          .from('trade_logs')
+          .select('*')
+          .eq('cycle_id', targetCycleId)
+          .order('date', { ascending: true });
 
-        newLogs.push({
-          id: logPayload.id,
-          cycleId: logPayload.cycle_id,
-          date: logPayload.date,
-          type: 'buy',
-          orderType: logPayload.order_type,
-          price: logPayload.price,
-          qty: logPayload.qty,
-          memo: logPayload.memo,
-          profit: logPayload.profit,
-          commissionRate: logPayload.commission_rate,
-          batchId: logPayload.batch_id,
-        });
+        const logs: TradeLog[] = (dbLogs && dbLogs.length > 0)
+          ? dbLogs.map((row: any) => ({
+              id: row.id,
+              cycleId: row.cycle_id,
+              date: row.date,
+              type: row.type,
+              orderType: row.order_type,
+              price: row.price,
+              qty: row.qty,
+              memo: row.memo,
+              profit: row.profit,
+              commissionRate: row.commission_rate ?? 0.1,
+              batchId: row.batch_id || row.id,
+            }))
+          : (clientCycle?.logs || []);
+
+        const cycle: Cycle = cycleRow
+          ? {
+              id: cycleRow.id,
+              name: cycleRow.name,
+              ticker: cycleRow.ticker,
+              version: cycleRow.version,
+              splitCount: cycleRow.split_count ?? 40,
+              maxPercent: cycleRow.max_percent ?? 20,
+              principal: cycleRow.principal ?? 0,
+              compoundMode: cycleRow.compound_mode ?? null,
+              status: cycleRow.status ?? 'active',
+              startDate: cycleRow.start_date,
+              commissionRate: cycleRow.commission_rate ?? 0.1,
+              autoTradeEnabled: cycleRow.auto_trade_enabled ?? cycleRow.is_auto_trade_enabled ?? true,
+              logs,
+            }
+          : clientCycle!;
+
+        const res = await syncExecutionsForCycle(cycle, nyDateStr);
+        return NextResponse.json(res);
       }
 
-      // 🟢 텔레그램 체결 동기화 알림 발송
-      await notifyExecutionSync(cycle.name, newLogs);
+      // 일괄 동기화
+      let { data: dbCycles } = await supabaseAdmin.from('cycles').select('*');
+      if (!dbCycles || dbCycles.length === 0) dbCycles = initialCyclesData as any[];
+
+      const activeCycles = (dbCycles || []).filter((c: any) => !c.status || c.status === 'active');
+      const results = [];
+
+      for (const cycleRow of activeCycles) {
+        const { data: dbLogs } = await supabaseAdmin
+          .from('trade_logs')
+          .select('*')
+          .eq('cycle_id', cycleRow.id)
+          .order('date', { ascending: true });
+
+        const logs: TradeLog[] = (dbLogs && dbLogs.length > 0)
+          ? dbLogs.map((row: any) => ({
+              id: row.id,
+              cycleId: row.cycle_id,
+              date: row.date,
+              type: row.type,
+              orderType: row.order_type,
+              price: row.price,
+              qty: row.qty,
+              memo: row.memo,
+              profit: row.profit,
+              commissionRate: row.commission_rate ?? 0.1,
+              batchId: row.batch_id || row.id,
+            }))
+          : [];
+
+        const cycleObj: Cycle = {
+          id: cycleRow.id,
+          name: cycleRow.name,
+          ticker: cycleRow.ticker,
+          version: cycleRow.version,
+          splitCount: cycleRow.split_count ?? 40,
+          maxPercent: cycleRow.max_percent ?? 20,
+          principal: cycleRow.principal ?? 0,
+          compoundMode: cycleRow.compound_mode ?? null,
+          status: cycleRow.status ?? 'active',
+          startDate: cycleRow.start_date,
+          commissionRate: cycleRow.commission_rate ?? 0.1,
+          autoTradeEnabled: cycleRow.auto_trade_enabled ?? cycleRow.is_auto_trade_enabled ?? true,
+          logs,
+        };
+
+        const res = await syncExecutionsForCycle(cycleObj, nyDateStr);
+        results.push(res);
+      }
 
       return NextResponse.json({
         success: true,
-        newLogs,
-        message: `[${cycle.name}] 체결 기록 ${newLogs.length}건이 DB에 갱신되고 텔레그램 알림이 발송되었습니다.`,
+        message: `전체 ${activeCycles.length}개 사이클 체결 동기화 완료`,
+        results,
       });
+    }
+
+    // ── 6. cycleId / cycleName 필수 액션 검증 ────────────────────────────
+    if (!cycleId && !cycleName && !clientCycle) {
+      return NextResponse.json(
+        { success: false, error: 'cycleId 파라미터 누락', message: 'cycleId 또는 cycle 객체 파라미터가 누락되었습니다.' },
+        { status: 400 }
+      );
     }
 
     return NextResponse.json({ success: false, error: 'Invalid action', message: '알 수 없는 action 타입입니다.' }, { status: 400 });
@@ -704,3 +841,4 @@ export async function POST(request: Request) {
     );
   }
 }
+
