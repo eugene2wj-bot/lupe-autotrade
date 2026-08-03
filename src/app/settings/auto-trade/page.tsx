@@ -25,25 +25,131 @@ export default function AutoTradeSettingsPage() {
   const [testLog, setTestLog] = useState<string[]>([]);
   const [selectedCycleId, setSelectedCycleId] = useState<string | null>(null);
 
+  // 🔒 보안 PIN 번호 인증 및 마스킹 상태
+  const [isUnlocked, setIsUnlocked] = useState(false);
+  const [pinInput, setPinInput] = useState('');
+  const [pinError, setPinError] = useState('');
+  const [isPinVerifying, setIsPinVerifying] = useState(false);
+
+  // PIN 번호 변경 모달 상태
+  const [showChangePinModal, setShowChangePinModal] = useState(false);
+  const [currentPinInput, setCurrentPinInput] = useState('');
+  const [newPinInput, setNewPinInput] = useState('');
+  const [confirmPinInput, setConfirmPinInput] = useState('');
+  const [changePinError, setChangePinError] = useState('');
+  const [isChangingPin, setIsChangingPin] = useState(false);
+
+  // 입력 필드 마스킹 (숨기기/보이기) 상태
+  const [showTossAppKey, setShowTossAppKey] = useState(false);
+  const [showTossAppSecret, setShowTossAppSecret] = useState(false);
+  const [showTossAccountNo, setShowTossAccountNo] = useState(false);
+  const [showTelegramBotToken, setShowTelegramBotToken] = useState(false);
+  const [showTelegramChatId, setShowTelegramChatId] = useState(false);
+
+  // 보안 인증(PIN) 성공 후 DB 데이터 로드
   useEffect(() => {
-    async function loadData() {
-      setIsLoading(true);
-      try {
-        const fetchedSettings = await getAppSettings();
-        setSettings(fetchedSettings);
-        if (cycles.length > 0) {
-          setSelectedCycleId(cycles[0].id);
+    if (isUnlocked) {
+      async function loadData() {
+        setIsLoading(true);
+        try {
+          const fetchedSettings = await getAppSettings();
+          setSettings(fetchedSettings);
+          if (cycles.length > 0) {
+            setSelectedCycleId(cycles[0].id);
+          }
+        } finally {
+          setIsLoading(false);
         }
-      } finally {
-        setIsLoading(false);
       }
+      loadData();
     }
-    loadData();
-  }, [cycles]);
+  }, [isUnlocked, cycles]);
 
   const addLog = (msg: string) => {
     const time = new Date().toLocaleTimeString('ko-KR');
     setTestLog((prev) => [`[${time}] ${msg}`, ...prev.slice(0, 30)]);
+  };
+
+  // 🔒 PIN 번호 인증 처리
+  const handleVerifyPin = async (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
+    if (!pinInput.trim()) {
+      setPinError('PIN 번호를 입력해주세요.');
+      return;
+    }
+
+    setIsPinVerifying(true);
+    setPinError('');
+
+    try {
+      const res = await fetch('/api/auto-trade', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action: 'VERIFY_PIN',
+          pinCode: pinInput.trim(),
+        }),
+      });
+
+      const data = await res.json();
+      if (res.ok && data.success) {
+        setIsUnlocked(true);
+        setPinError('');
+      } else {
+        setPinError(data.message || data.error || '보안 PIN 번호가 일치하지 않습니다. (기본값: 1234)');
+      }
+    } catch {
+      setPinError('PIN 인증 중 네트워크 오류가 발생했습니다.');
+    } finally {
+      setIsPinVerifying(false);
+    }
+  };
+
+  // 🔑 PIN 번호 변경 처리
+  const handleChangePinSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setChangePinError('');
+
+    if (!currentPinInput.trim()) {
+      setChangePinError('현재 PIN 번호를 입력하세요.');
+      return;
+    }
+    if (!newPinInput.trim() || newPinInput.length < 4) {
+      setChangePinError('새 PIN 번호는 4자리 이상 입력해야 합니다.');
+      return;
+    }
+    if (newPinInput !== confirmPinInput) {
+      setChangePinError('새 PIN 번호와 확인 번호가 일치하지 않습니다.');
+      return;
+    }
+
+    setIsChangingPin(true);
+    try {
+      const res = await fetch('/api/auto-trade', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action: 'CHANGE_PIN',
+          currentPin: currentPinInput.trim(),
+          newPin: newPinInput.trim(),
+        }),
+      });
+
+      const data = await res.json();
+      if (res.ok && data.success) {
+        alert('✅ 보안 PIN 번호가 성공적으로 변경되었습니다.');
+        setShowChangePinModal(false);
+        setCurrentPinInput('');
+        setNewPinInput('');
+        setConfirmPinInput('');
+      } else {
+        setChangePinError(data.message || data.error || 'PIN 번호 변경 실패');
+      }
+    } catch {
+      setChangePinError('PIN 변경 처리 중 오류가 발생했습니다.');
+    } finally {
+      setIsChangingPin(false);
+    }
   };
 
   // 전역 자동매매 토글
@@ -54,8 +160,6 @@ export default function AutoTradeSettingsPage() {
 
     await updateAppSettings({ is_global_auto_trade: nextVal });
     addLog(`전역 자동매매 상태 변경: ${nextVal ? 'ON 🟢' : 'OFF 🔴'}`);
-
-    // 텔레그램 알림
     await notifyAutoTradeStatus('전역 설정', nextVal, true);
   };
 
@@ -66,19 +170,16 @@ export default function AutoTradeSettingsPage() {
 
     await saveCycle({ ...cycle, autoTradeEnabled: nextVal });
     addLog(`사이클 [${cycle.name}] 자동매매: ${nextVal ? 'ON 🟢' : 'OFF 🔴'}`);
-
-    // 텔레그램 알림
     await notifyAutoTradeStatus(cycle.name, nextVal, false);
   };
 
-  // 설정 저장 폼 제출 (서버 API 라우트로 이관)
+  // 설정 저장 폼 제출
   const handleSaveSettings = async (e: React.FormEvent) => {
     e.preventDefault();
     setIsSaving(true);
     try {
       addLog('💾 /api/auto-trade 라우트로 app_settings DB 저장 요청 중...');
 
-      // camelCase 및 snake_case 바인딩 100% 보장 패킷 생성
       const settingsPayload = {
         toss_app_key: settings.toss_app_key,
         toss_app_secret: settings.toss_app_secret,
@@ -112,10 +213,8 @@ export default function AutoTradeSettingsPage() {
           setSettings(data.settings);
         }
         addLog('✅ 설정이 DB에 안전하게 저장되었습니다');
-        console.log('[AutoTradeSettings] Save success:', data.settings);
         alert('✅ 설정이 DB에 안전하게 저장되었습니다.');
 
-        // 텔레그램 연동 확인 테스트 메세지
         if (settings.telegram_bot_token && settings.telegram_chat_id) {
           await sendTelegramMessage(
             `⚙️ <b>[루프 설정 저장 알림]</b>\n\n토스증권 및 텔레그램 설정이 성공적으로 DB에 저장되었습니다.`
@@ -124,7 +223,6 @@ export default function AutoTradeSettingsPage() {
       } else {
         const errorDetail = data.error || data.message || '알 수 없는 서버 에러';
         addLog(`🔴 DB 저장 실패: ${errorDetail}`);
-        console.error('[AutoTradeSettings] Save error:', errorDetail);
         alert(errorDetail);
       }
     } catch (err: any) {
@@ -144,7 +242,7 @@ export default function AutoTradeSettingsPage() {
       return;
     }
 
-    addLog(`🧪 사이클 [${targetCycle.name}] 토스 API 가상 주문 테스트 시작 (서버보안검증)...`);
+    addLog(`🧪 사이클 [${targetCycle.name}] 토스 API 가상 주문 테스트 시작...`);
     const res = await submitSimulatedOrders(targetCycle);
 
     if (res.success) {
@@ -154,7 +252,6 @@ export default function AutoTradeSettingsPage() {
     } else {
       const errorMsg = res.message || '가상 주문 처리 실패';
       addLog(`🔴 DB/텔레그램 오류: ${errorMsg}`);
-      console.error('[TestOrderSubmit] Error:', errorMsg);
       alert(errorMsg);
     }
   };
@@ -177,53 +274,108 @@ export default function AutoTradeSettingsPage() {
     } else {
       const errorMsg = res.message || '체결 동기화 실패';
       addLog(`🔴 DB/텔레그램 오류: ${errorMsg}`);
-      console.error('[TestExecutionSync] Error:', errorMsg);
       alert(errorMsg);
     }
   };
 
-  if (isLoading) {
+  // ── 🔒 PIN 미인증 시 화면 전체 가림 모달 ──
+  if (!isUnlocked) {
     return (
-      <div className="text-center py-20">
-        <div className="w-8 h-8 border-2 border-indigo-500 border-t-transparent rounded-full animate-spin mx-auto mb-3" />
-        <p className="text-sm text-gray-500 dark:text-gray-400">설정을 불러오는 중입니다...</p>
+      <div className="fixed inset-0 z-50 flex items-center justify-center bg-gray-950/80 backdrop-blur-md p-4">
+        <div className="w-full max-w-sm bg-white dark:bg-gray-900 border border-gray-100 dark:border-gray-800 rounded-3xl p-6 shadow-2xl space-y-5 animate-in fade-in zoom-in duration-200">
+          <div className="text-center space-y-2">
+            <div className="inline-flex items-center justify-center w-14 h-14 rounded-2xl bg-indigo-50 dark:bg-indigo-950/50 text-indigo-600 dark:text-indigo-400 text-2xl mb-1">
+              🔒
+            </div>
+            <h2 className="text-xl font-bold text-gray-900 dark:text-gray-50">보안 PIN 번호 인증</h2>
+            <p className="text-xs text-gray-500 dark:text-gray-400 leading-relaxed">
+              자동매매 설정 및 API 인증키 조회를 위해<br />
+              <strong className="text-indigo-600 dark:text-indigo-400">보안 PIN 번호(기본값: 1234)</strong>를 입력하세요.
+            </p>
+          </div>
+
+          <form onSubmit={handleVerifyPin} className="space-y-4">
+            <div>
+              <input
+                type="password"
+                maxLength={8}
+                autoFocus
+                value={pinInput}
+                onChange={(e) => setPinInput(e.target.value)}
+                placeholder="PIN 번호 입력"
+                className="w-full px-4 py-3 text-center text-lg font-bold tracking-widest bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-2xl outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/20 transition-all"
+              />
+              {pinError && (
+                <p className="mt-2 text-xs font-semibold text-rose-500 text-center animate-shake">
+                  ⚠️ {pinError}
+                </p>
+              )}
+            </div>
+
+            <button
+              type="submit"
+              disabled={isPinVerifying}
+              className="w-full py-3.5 bg-indigo-600 hover:bg-indigo-700 active:scale-[0.98] text-white font-bold text-sm rounded-2xl shadow-lg shadow-indigo-500/25 transition-all flex items-center justify-center gap-2"
+            >
+              {isPinVerifying ? (
+                <span>인증 확인 중...</span>
+              ) : (
+                <>
+                  <span>🔓</span>
+                  <span>인증 및 설정 진입</span>
+                </>
+              )}
+            </button>
+          </form>
+
+          <div className="text-center pt-2">
+            <Link href="/" className="text-xs font-semibold text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 transition-colors">
+              ← 메인 대시보드로 돌아가기
+            </Link>
+          </div>
+        </div>
       </div>
     );
   }
 
   return (
-    <div className="space-y-6 max-w-4xl mx-auto">
-      {/* 헤더 */}
-      <div className="flex items-center justify-between gap-3 pb-4 border-b border-gray-200 dark:border-gray-800">
-        <div className="flex items-center gap-3">
+    <div className="max-w-4xl mx-auto space-y-6 pb-12">
+      {/* ── 헤더 타이틀 및 메인으로 이동 ── */}
+      <div className="flex items-center justify-between">
+        <div>
+          <h1 className="text-xl font-bold text-gray-900 dark:text-gray-50 flex items-center gap-2">
+            <span>⚙️</span> 자동매매 & 토스증권 API 설정
+          </h1>
+          <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
+            미국 증시 개장 시간에 맞춘 자동 주문 생성 및 텔레그램 알림을 설정합니다.
+          </p>
+        </div>
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={() => setShowChangePinModal(true)}
+            className="px-3.5 py-2 bg-gray-100 dark:bg-gray-800 hover:bg-gray-200 dark:hover:bg-gray-700 text-gray-700 dark:text-gray-200 font-semibold text-xs rounded-xl transition-colors flex items-center gap-1.5"
+          >
+            <span>🔑</span> PIN 번호 변경
+          </button>
           <Link
             href="/"
-            className="flex items-center justify-center w-8 h-8 rounded-full bg-white dark:bg-gray-900 shadow-xs text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200 transition-colors"
+            className="px-3.5 py-2 bg-gray-100 dark:bg-gray-800 hover:bg-gray-200 dark:hover:bg-gray-700 text-gray-700 dark:text-gray-200 font-semibold text-xs rounded-xl transition-colors"
           >
-            <svg viewBox="0 0 16 16" className="w-4 h-4" fill="currentColor">
-              <path fillRule="evenodd" d="M9.78 4.22a.75.75 0 0 1 0 1.06L7.06 8l2.72 2.72a.75.75 0 1 1-1.06 1.06l-3.25-3.25a.75.75 0 0 1 0-1.06l3.25-3.25a.75.75 0 0 1 1.06 0Z" clipRule="evenodd" />
-            </svg>
+            ← 메인으로
           </Link>
-          <div>
-            <h1 className="text-xl font-bold text-gray-900 dark:text-gray-50 flex items-center gap-2">
-              <span>🤖</span> 자동매매 & DB / 텔레그램 연동
-            </h1>
-            <p className="text-xs text-gray-500 dark:text-gray-400 mt-0.5">
-              Supabase DB, 토스증권 API 자동주문 및 텔레그램 실시간 알림 모듈 설정
-            </p>
-          </div>
         </div>
       </div>
 
-      {/* ── 1. 자동매매 스위치 컨트롤 ── */}
-      <div className="bg-white dark:bg-gray-900 rounded-2xl p-5 shadow-xs space-y-4">
+      {/* ── 1. 전역 및 개별 사이클 자동매매 스위치 ── */}
+      <div className="bg-white dark:bg-gray-900 rounded-2xl p-5 shadow-xs space-y-4 border border-gray-100 dark:border-gray-800">
         <div className="flex items-center justify-between border-b border-gray-100 dark:border-gray-800 pb-3">
           <div>
             <h2 className="text-base font-bold text-gray-900 dark:text-gray-50 flex items-center gap-1.5">
-              <span>⚡</span> 전역 자동매매 실행 스위치
+              <span>🤖</span> 전역 자동매매 마스터 스위치
             </h2>
             <p className="text-xs text-gray-400 dark:text-gray-500 mt-0.5">
-              전체 시스템의 장전 자동 주문 제출 기능을 켜거나 끕니다.
+              OFF 설정 시 지정 시각이 되더라도 주문 생성이 차단됩니다.
             </p>
           </div>
           <button
@@ -241,10 +393,10 @@ export default function AutoTradeSettingsPage() {
           </button>
         </div>
 
-        {/* 사이클별 개별 스위치 */}
-        <div>
-          <h3 className="text-xs font-bold text-gray-400 dark:text-gray-500 uppercase tracking-wide mb-2">
-            사이클별 자동매매 개별 제어
+        {/* 개별 사이클 자동매매 목록 */}
+        <div className="space-y-2">
+          <h3 className="text-xs font-bold text-gray-500 dark:text-gray-400 uppercase tracking-wider">
+            개별 사이클 자동매매 제어
           </h3>
           <div className="divide-y divide-gray-100 dark:divide-gray-800 border border-gray-100 dark:border-gray-800 rounded-xl overflow-hidden">
             {cycles.map((cycle) => {
@@ -284,52 +436,86 @@ export default function AutoTradeSettingsPage() {
         </div>
       </div>
 
-      {/* ── 2. 토스증권 API & 텔레그램 연동 폼 ── */}
-      <form onSubmit={handleSaveSettings} className="bg-white dark:bg-gray-900 rounded-2xl p-5 shadow-xs space-y-4">
+      {/* ── 2. 토스증권 API & 텔레그램 연동 폼 (마스킹 및 보이기/숨기기 지원) ── */}
+      <form onSubmit={handleSaveSettings} className="bg-white dark:bg-gray-900 rounded-2xl p-5 shadow-xs space-y-4 border border-gray-100 dark:border-gray-800">
         <h2 className="text-base font-bold text-gray-900 dark:text-gray-50 flex items-center gap-1.5 border-b border-gray-100 dark:border-gray-800 pb-3">
           <span>🔑</span> 토스증권 API & 텔레그램 인증키 설정
         </h2>
 
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          {/* 토스증권 App Key */}
           <div>
             <label className="block text-xs font-bold text-gray-700 dark:text-gray-300 mb-1">
               토스증권 App Key
             </label>
-            <input
-              type="text"
-              value={settings.toss_app_key}
-              onChange={(e) => setSettings({ ...settings, toss_app_key: e.target.value })}
-              placeholder="App Key 입력"
-              className="w-full px-3 py-2 text-xs bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl outline-none focus:border-indigo-500"
-            />
+            <div className="relative flex items-center">
+              <input
+                type={showTossAppKey ? 'text' : 'password'}
+                value={settings.toss_app_key}
+                onChange={(e) => setSettings({ ...settings, toss_app_key: e.target.value })}
+                placeholder="App Key 입력"
+                className="w-full pr-10 px-3 py-2 text-xs bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl outline-none focus:border-indigo-500 transition-colors"
+              />
+              <button
+                type="button"
+                onClick={() => setShowTossAppKey(!showTossAppKey)}
+                className="absolute right-2.5 text-sm opacity-60 hover:opacity-100 transition-opacity"
+                title={showTossAppKey ? '숨기기' : '보이기'}
+              >
+                {showTossAppKey ? '🙈' : '👁️'}
+              </button>
+            </div>
           </div>
 
+          {/* 토스증권 App Secret */}
           <div>
             <label className="block text-xs font-bold text-gray-700 dark:text-gray-300 mb-1">
               토스증권 App Secret
             </label>
-            <input
-              type="password"
-              value={settings.toss_app_secret}
-              onChange={(e) => setSettings({ ...settings, toss_app_secret: e.target.value })}
-              placeholder="App Secret 입력"
-              className="w-full px-3 py-2 text-xs bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl outline-none focus:border-indigo-500"
-            />
+            <div className="relative flex items-center">
+              <input
+                type={showTossAppSecret ? 'text' : 'password'}
+                value={settings.toss_app_secret}
+                onChange={(e) => setSettings({ ...settings, toss_app_secret: e.target.value })}
+                placeholder="App Secret 입력"
+                className="w-full pr-10 px-3 py-2 text-xs bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl outline-none focus:border-indigo-500 transition-colors"
+              />
+              <button
+                type="button"
+                onClick={() => setShowTossAppSecret(!showTossAppSecret)}
+                className="absolute right-2.5 text-sm opacity-60 hover:opacity-100 transition-opacity"
+                title={showTossAppSecret ? '숨기기' : '보이기'}
+              >
+                {showTossAppSecret ? '🙈' : '👁️'}
+              </button>
+            </div>
           </div>
 
+          {/* 토스증권 계좌번호 */}
           <div>
             <label className="block text-xs font-bold text-gray-700 dark:text-gray-300 mb-1">
               토스증권 계좌번호
             </label>
-            <input
-              type="text"
-              value={settings.toss_account_no}
-              onChange={(e) => setSettings({ ...settings, toss_account_no: e.target.value })}
-              placeholder="예: 12345678-01"
-              className="w-full px-3 py-2 text-xs bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl outline-none focus:border-indigo-500"
-            />
+            <div className="relative flex items-center">
+              <input
+                type={showTossAccountNo ? 'text' : 'password'}
+                value={settings.toss_account_no}
+                onChange={(e) => setSettings({ ...settings, toss_account_no: e.target.value })}
+                placeholder="예: 12345678-01"
+                className="w-full pr-10 px-3 py-2 text-xs bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl outline-none focus:border-indigo-500 transition-colors"
+              />
+              <button
+                type="button"
+                onClick={() => setShowTossAccountNo(!showTossAccountNo)}
+                className="absolute right-2.5 text-sm opacity-60 hover:opacity-100 transition-opacity"
+                title={showTossAccountNo ? '숨기기' : '보이기'}
+              >
+                {showTossAccountNo ? '🙈' : '👁️'}
+              </button>
+            </div>
           </div>
 
+          {/* 자동주문 실행 시각 */}
           <div>
             <label className="block text-xs font-bold text-gray-700 dark:text-gray-300 mb-1">
               자동주문 실행 시각 (한국시간)
@@ -343,30 +529,52 @@ export default function AutoTradeSettingsPage() {
             />
           </div>
 
+          {/* 텔레그램 Bot Token */}
           <div>
             <label className="block text-xs font-bold text-gray-700 dark:text-gray-300 mb-1">
               텔레그램 Bot Token
             </label>
-            <input
-              type="password"
-              value={settings.telegram_bot_token}
-              onChange={(e) => setSettings({ ...settings, telegram_bot_token: e.target.value })}
-              placeholder="123456789:ABCdefGHI..."
-              className="w-full px-3 py-2 text-xs bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl outline-none focus:border-indigo-500"
-            />
+            <div className="relative flex items-center">
+              <input
+                type={showTelegramBotToken ? 'text' : 'password'}
+                value={settings.telegram_bot_token}
+                onChange={(e) => setSettings({ ...settings, telegram_bot_token: e.target.value })}
+                placeholder="123456789:ABCdefGHI..."
+                className="w-full pr-10 px-3 py-2 text-xs bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl outline-none focus:border-indigo-500 transition-colors"
+              />
+              <button
+                type="button"
+                onClick={() => setShowTelegramBotToken(!showTelegramBotToken)}
+                className="absolute right-2.5 text-sm opacity-60 hover:opacity-100 transition-opacity"
+                title={showTelegramBotToken ? '숨기기' : '보이기'}
+              >
+                {showTelegramBotToken ? '🙈' : '👁️'}
+              </button>
+            </div>
           </div>
 
+          {/* 텔레그램 Chat ID */}
           <div>
             <label className="block text-xs font-bold text-gray-700 dark:text-gray-300 mb-1">
               텔레그램 Chat ID
             </label>
-            <input
-              type="text"
-              value={settings.telegram_chat_id}
-              onChange={(e) => setSettings({ ...settings, telegram_chat_id: e.target.value })}
-              placeholder="예: 987654321"
-              className="w-full px-3 py-2 text-xs bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl outline-none focus:border-indigo-500"
-            />
+            <div className="relative flex items-center">
+              <input
+                type={showTelegramChatId ? 'text' : 'password'}
+                value={settings.telegram_chat_id}
+                onChange={(e) => setSettings({ ...settings, telegram_chat_id: e.target.value })}
+                placeholder="예: 987654321"
+                className="w-full pr-10 px-3 py-2 text-xs bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl outline-none focus:border-indigo-500 transition-colors"
+              />
+              <button
+                type="button"
+                onClick={() => setShowTelegramChatId(!showTelegramChatId)}
+                className="absolute right-2.5 text-sm opacity-60 hover:opacity-100 transition-opacity"
+                title={showTelegramChatId ? '숨기기' : '보이기'}
+              >
+                {showTelegramChatId ? '🙈' : '👁️'}
+              </button>
+            </div>
           </div>
         </div>
 
@@ -374,7 +582,7 @@ export default function AutoTradeSettingsPage() {
           <button
             type="submit"
             disabled={isSaving}
-            className="px-5 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs rounded-xl shadow-xs transition-colors flex items-center gap-1.5"
+            className="px-5 py-2.5 bg-indigo-600 hover:bg-indigo-700 active:scale-95 text-white font-bold text-xs rounded-xl shadow-xs transition-all flex items-center gap-1.5"
           >
             {isSaving ? 'DB 저장 중...' : '💾 DB 설정 저장 완료'}
           </button>
@@ -382,7 +590,7 @@ export default function AutoTradeSettingsPage() {
       </form>
 
       {/* ── 3. 테스트 컨트롤 ── */}
-      <div className="bg-white dark:bg-gray-900 rounded-2xl p-5 shadow-xs space-y-4">
+      <div className="bg-white dark:bg-gray-900 rounded-2xl p-5 shadow-xs space-y-4 border border-gray-100 dark:border-gray-800">
         <h2 className="text-base font-bold text-gray-900 dark:text-gray-50 flex items-center gap-1.5 border-b border-gray-100 dark:border-gray-800 pb-3">
           <span>🧪</span> 토스 API & 텔레그램 연동 테스트
         </h2>
@@ -406,7 +614,7 @@ export default function AutoTradeSettingsPage() {
           <button
             type="button"
             onClick={handleTestOrderSubmit}
-            className="px-4 py-2 bg-purple-600 hover:bg-purple-700 text-white font-bold text-xs rounded-xl shadow-xs transition-colors"
+            className="px-4 py-2 bg-purple-600 hover:bg-purple-700 active:scale-95 text-white font-bold text-xs rounded-xl shadow-xs transition-all"
           >
             🧪 토스 API 가상 주문 테스트
           </button>
@@ -414,7 +622,7 @@ export default function AutoTradeSettingsPage() {
           <button
             type="button"
             onClick={handleTestExecutionSync}
-            className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs rounded-xl shadow-xs transition-colors"
+            className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 active:scale-95 text-white font-bold text-xs rounded-xl shadow-xs transition-all"
           >
             🔄 체결 기록 동기화 테스트
           </button>
@@ -429,6 +637,93 @@ export default function AutoTradeSettingsPage() {
           </div>
         )}
       </div>
+
+      {/* 🔑 PIN 번호 변경 모달 팝업 */}
+      {showChangePinModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-gray-950/60 backdrop-blur-xs p-4">
+          <div className="w-full max-w-sm bg-white dark:bg-gray-900 border border-gray-100 dark:border-gray-800 rounded-3xl p-6 shadow-2xl space-y-4 animate-in fade-in zoom-in duration-150">
+            <div className="flex items-center justify-between border-b border-gray-100 dark:border-gray-800 pb-3">
+              <h3 className="text-base font-bold text-gray-900 dark:text-gray-50 flex items-center gap-1.5">
+                <span>🔑</span> 보안 PIN 번호 변경
+              </h3>
+              <button
+                type="button"
+                onClick={() => setShowChangePinModal(false)}
+                className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 text-sm font-bold"
+              >
+                ✕
+              </button>
+            </div>
+
+            <form onSubmit={handleChangePinSubmit} className="space-y-3">
+              <div>
+                <label className="block text-xs font-semibold text-gray-600 dark:text-gray-400 mb-1">
+                  현재 PIN 번호
+                </label>
+                <input
+                  type="password"
+                  maxLength={8}
+                  value={currentPinInput}
+                  onChange={(e) => setCurrentPinInput(e.target.value)}
+                  placeholder="현재 PIN 입력"
+                  className="w-full px-3 py-2 text-xs bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl outline-none focus:border-indigo-500"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-gray-600 dark:text-gray-400 mb-1">
+                  새 PIN 번호 (4자리 이상)
+                </label>
+                <input
+                  type="password"
+                  maxLength={8}
+                  value={newPinInput}
+                  onChange={(e) => setNewPinInput(e.target.value)}
+                  placeholder="새 PIN 입력"
+                  className="w-full px-3 py-2 text-xs bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl outline-none focus:border-indigo-500"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-gray-600 dark:text-gray-400 mb-1">
+                  새 PIN 번호 확인
+                </label>
+                <input
+                  type="password"
+                  maxLength={8}
+                  value={confirmPinInput}
+                  onChange={(e) => setConfirmPinInput(e.target.value)}
+                  placeholder="새 PIN 재입력"
+                  className="w-full px-3 py-2 text-xs bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl outline-none focus:border-indigo-500"
+                />
+              </div>
+
+              {changePinError && (
+                <p className="text-xs font-semibold text-rose-500 pt-1">
+                  ⚠️ {changePinError}
+                </p>
+              )}
+
+              <div className="pt-2 flex justify-end gap-2">
+                <button
+                  type="button"
+                  onClick={() => setShowChangePinModal(false)}
+                  className="px-4 py-2 bg-gray-100 dark:bg-gray-800 text-gray-700 dark:text-gray-300 font-semibold text-xs rounded-xl"
+                >
+                  취소
+                </button>
+                <button
+                  type="submit"
+                  disabled={isChangingPin}
+                  className="px-4 py-2 bg-indigo-600 text-white font-bold text-xs rounded-xl hover:bg-indigo-700"
+                >
+                  {isChangingPin ? '변경 중...' : 'PIN 번호 변경 저장'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

@@ -256,6 +256,7 @@ export async function getAppSettings(): Promise<AppSettings> {
       telegram_bot_token: data.telegram_bot_token ?? data.telegramBotToken ?? '',
       telegram_chat_id: data.telegram_chat_id ?? data.telegramChatId ?? '',
       auto_trade_time: data.auto_trade_time ?? data.autoTradeTime ?? '22:30',
+      pin_code: data.pin_code ?? data.pinCode ?? '1234',
       updated_at: data.updated_at,
     };
   } catch {

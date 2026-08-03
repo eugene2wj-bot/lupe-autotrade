@@ -70,6 +70,7 @@ export interface AppSettings {
   telegram_bot_token: string;
   telegram_chat_id: string;
   auto_trade_time: string;
+  pin_code?: string;
   updated_at?: string;
 }
 

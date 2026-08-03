@@ -24,7 +24,70 @@ export async function POST(request: Request) {
     const body = await request.json();
     const { action, cycleId, cycleName, cycle: clientCycle, forceTest } = body;
 
-    // ── 1. 설정 저장 액션 (`SAVE_SETTINGS` 또는 `save-settings`) ───────────
+    // ── 0. PIN 번호 검증 및 변경 액션 (`VERIFY_PIN`, `CHANGE_PIN`) ───────────
+    if (action === 'VERIFY_PIN') {
+      const inputPin = body.pinCode || body.pin_code || '';
+      const { data: existingSettings } = await supabaseAdmin
+        .from('app_settings')
+        .select('*')
+        .limit(1)
+        .maybeSingle();
+
+      const validPin = existingSettings?.pin_code || (existingSettings as any)?.pinCode || '1234';
+      if (inputPin === validPin) {
+        return NextResponse.json({ success: true, message: 'PIN 번호 인증 성공' });
+      } else {
+        return NextResponse.json(
+          { success: false, error: '보안 PIN 번호가 일치하지 않습니다.', message: '보안 PIN 번호가 일치하지 않습니다.' },
+          { status: 401 }
+        );
+      }
+    }
+
+    if (action === 'CHANGE_PIN') {
+      const { currentPin, newPin } = body;
+      const { data: existingSettings } = await supabaseAdmin
+        .from('app_settings')
+        .select('*')
+        .limit(1)
+        .maybeSingle();
+
+      const validPin = existingSettings?.pin_code || (existingSettings as any)?.pinCode || '1234';
+      if (currentPin !== validPin) {
+        return NextResponse.json(
+          { success: false, error: '현재 PIN 번호가 일치하지 않습니다.', message: '현재 PIN 번호가 일치하지 않습니다.' },
+          { status: 400 }
+        );
+      }
+
+      if (!newPin || newPin.length < 4) {
+        return NextResponse.json(
+          { success: false, error: '신규 PIN 번호는 4자리 이상이어야 합니다.', message: '신규 PIN 번호는 4자리 이상이어야 합니다.' },
+          { status: 400 }
+        );
+      }
+
+      const targetId = existingSettings?.id ?? 1;
+      const payload: any = {
+        ...existingSettings,
+        id: targetId,
+        pin_code: newPin,
+        updated_at: new Date().toISOString(),
+      };
+
+      let { error: updateErr } = await supabaseAdmin
+        .from('app_settings')
+        .upsert(payload);
+
+      if (updateErr && updateErr.message.includes('pin_code')) {
+        const fallback = { ...payload };
+        delete fallback.pin_code;
+        await supabaseAdmin.from('app_settings').upsert(fallback);
+      }
+
+      return NextResponse.json({ success: true, message: 'PIN 번호가 성공적으로 변경되었습니다.' });
+    }
+
     // ── 1. 설정 저장 액션 (`SAVE_SETTINGS` 또는 `save-settings`) ───────────
     if (action === 'SAVE_SETTINGS' || action === 'save-settings') {
       const src = body.settings || body || {};
@@ -42,6 +105,7 @@ export async function POST(request: Request) {
       const telegram_bot_token = src.telegramBotToken ?? src.telegram_bot_token;
       const telegram_chat_id = src.telegramChatId ?? src.telegram_chat_id;
       const auto_trade_time = src.autoTradeTime ?? src.auto_trade_time;
+      const pin_code = src.pinCode ?? src.pin_code;
       const is_global_auto_trade = src.is_global_auto_trade ?? src.isGlobalAutoTrade;
 
       let targetId: any = existingSettings?.id ?? src.id ?? 1;
@@ -56,6 +120,7 @@ export async function POST(request: Request) {
         telegram_bot_token: (telegram_bot_token !== undefined && telegram_bot_token !== null && telegram_bot_token !== '') ? telegram_bot_token : (existingSettings?.telegram_bot_token ?? ''),
         telegram_chat_id: (telegram_chat_id !== undefined && telegram_chat_id !== null && telegram_chat_id !== '') ? telegram_chat_id : (existingSettings?.telegram_chat_id ?? ''),
         auto_trade_time: (auto_trade_time !== undefined && auto_trade_time !== null && auto_trade_time !== '') ? auto_trade_time : (existingSettings?.auto_trade_time ?? '22:30'),
+        pin_code: (pin_code !== undefined && pin_code !== null && pin_code !== '') ? pin_code : (existingSettings?.pin_code ?? '1234'),
         updated_at: new Date().toISOString(),
       };
 
@@ -77,6 +142,19 @@ export async function POST(request: Request) {
           .single();
         savedData = retryInt.data;
         saveErr = retryInt.error;
+      }
+
+      // pin_code 컬럼 미존재 시 폴백 처리
+      if (saveErr && saveErr.message.includes('pin_code')) {
+        console.warn('[AutoTradeAPI] pin_code column missing in DB. Retrying without pin_code field...');
+        delete payload.pin_code;
+        const retry = await supabaseAdmin
+          .from('app_settings')
+          .upsert(payload)
+          .select('*')
+          .single();
+        savedData = retry.data;
+        saveErr = retry.error;
       }
 
       // auto_trade_time 컬럼이 Supabase DB 스키마에 존재하지 않는 경우 폴백 처리
