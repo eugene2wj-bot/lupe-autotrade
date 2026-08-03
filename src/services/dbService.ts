@@ -233,7 +233,7 @@ export async function deleteCycleFromDb(id: string): Promise<boolean> {
 }
 
 /**
- * 앱 전역 자동매매 & 토스/텔레그램 설정 조회
+ * 앱 전역 자동매매 & 토스/텔레그램 설정 조회 (ID 무관 첫 행 유연 조회)
  */
 export async function getAppSettings(): Promise<AppSettings> {
   try {
@@ -241,7 +241,7 @@ export async function getAppSettings(): Promise<AppSettings> {
       .from('app_settings')
       .select('*')
       .limit(1)
-      .single();
+      .maybeSingle();
 
     if (error || !data) {
       return DEFAULT_SETTINGS;
@@ -249,13 +249,13 @@ export async function getAppSettings(): Promise<AppSettings> {
 
     return {
       id: data.id,
-      is_global_auto_trade: data.is_global_auto_trade ?? false,
-      toss_app_key: data.toss_app_key ?? '',
-      toss_app_secret: data.toss_app_secret ?? '',
-      toss_account_no: data.toss_account_no ?? '',
-      telegram_bot_token: data.telegram_bot_token ?? '',
-      telegram_chat_id: data.telegram_chat_id ?? '',
-      auto_trade_time: data.auto_trade_time ?? '22:30',
+      is_global_auto_trade: data.is_global_auto_trade ?? data.isGlobalAutoTrade ?? false,
+      toss_app_key: data.toss_app_key ?? data.tossAppKey ?? '',
+      toss_app_secret: data.toss_app_secret ?? data.tossAppSecret ?? '',
+      toss_account_no: data.toss_account_no ?? data.tossAccountNo ?? '',
+      telegram_bot_token: data.telegram_bot_token ?? data.telegramBotToken ?? '',
+      telegram_chat_id: data.telegram_chat_id ?? data.telegramChatId ?? '',
+      auto_trade_time: data.auto_trade_time ?? data.autoTradeTime ?? '22:30',
       updated_at: data.updated_at,
     };
   } catch {

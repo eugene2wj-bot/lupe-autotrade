@@ -4,6 +4,7 @@
 // -------------------------------------------------------
 
 import { getAppSettings } from '@/services/dbService';
+import { supabaseAdmin } from '@/lib/supabase';
 import type { Order, TradeLog } from '@/types/cycle';
 
 export interface TelegramSendResult {
@@ -13,7 +14,7 @@ export interface TelegramSendResult {
 }
 
 /**
- * 텔레그램 메세지 전송 공통 함수 (상세 에러 진단 반환)
+ * 텔레그램 메세지 전송 공통 함수 (상세 에러 진단 반환 & ID 유연 조회)
  */
 export async function sendTelegramMessageDetailed(
   message: string,
@@ -23,8 +24,22 @@ export async function sendTelegramMessageDetailed(
   try {
     const settings = await getAppSettings();
 
-    const dbToken = settings.telegram_bot_token || process.env.TELEGRAM_BOT_TOKEN;
-    const authorizedChatId = settings.telegram_chat_id || process.env.TELEGRAM_CHAT_ID;
+    let dbToken = settings.telegram_bot_token || process.env.TELEGRAM_BOT_TOKEN;
+    let authorizedChatId = settings.telegram_chat_id || process.env.TELEGRAM_CHAT_ID;
+
+    // 만약 dbToken이 미검색되었다면 ID와 무관하게 app_settings DB 첫 행 수집 (service role 사용)
+    if (!dbToken || !authorizedChatId) {
+      const { data: rawAdminRow } = await supabaseAdmin
+        .from('app_settings')
+        .select('*')
+        .limit(1)
+        .maybeSingle();
+
+      if (rawAdminRow) {
+        dbToken = dbToken || rawAdminRow.telegram_bot_token || rawAdminRow.telegramBotToken;
+        authorizedChatId = authorizedChatId || rawAdminRow.telegram_chat_id || rawAdminRow.telegramChatId;
+      }
+    }
 
     const token = botToken || dbToken;
     const targetChatId = chatId || authorizedChatId;

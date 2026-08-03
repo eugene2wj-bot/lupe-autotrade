@@ -112,18 +112,18 @@ export async function POST(request: Request) {
       });
     }
 
-    // ── 2. app_settings 서버 단 조회 (SERVICE_ROLE_KEY 사용) ────────────────
+    // ── 2. app_settings 서버 단 조회 (SERVICE_ROLE_KEY 사용 - ID 무관 첫 행 조회) ────────────────
     const { data: settings, error: settingsErr } = await supabaseAdmin
       .from('app_settings')
       .select('*')
       .limit(1)
-      .single();
+      .maybeSingle();
 
     if (settingsErr || !settings) {
       console.warn('[AutoTradeAPI] app_settings fetch warning:', settingsErr?.message);
     }
 
-    const is_global_auto_trade = settings?.is_global_auto_trade ?? false;
+    const is_global_auto_trade = settings?.is_global_auto_trade ?? settings?.isGlobalAutoTrade ?? false;
 
     // ── 3. 자동매매 ON/OFF 토글 처리 (`toggle-auto-trade`) ─────────────────
     if (action === 'toggle-auto-trade') {
