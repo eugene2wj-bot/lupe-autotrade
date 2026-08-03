@@ -125,15 +125,25 @@ export async function notifyAutoTradeStatus(
 export async function notifyOrdersSubmittedDetailed(
   cycleName: string,
   orders: Order[],
-  options?: { isRealToss?: boolean; ticker?: string }
+  options?: { isRealToss?: boolean; ticker?: string; errorReason?: string; isFailed?: boolean; partialFailReason?: string }
 ): Promise<TelegramSendResult> {
   const isRealToss = options?.isRealToss ?? false;
   const tickerStr = (options?.ticker || '').toUpperCase() || cycleName;
 
+  if (options?.isFailed) {
+    const errorMsg =
+      `🔴 <b>[토스 API 주문 전송 실패]</b>\n\n` +
+      `사유: <b>${options.errorReason || '토스 API 오류'}</b>\n` +
+      `사이클: <b>${cycleName} (${tickerStr})</b>\n` +
+      `시각: ${new Date().toLocaleTimeString('ko-KR')}\n\n` +
+      `⚠️ 토스증권 API 연동 중 오류가 발생하여 실제 주문이 제출되지 않았습니다.`;
+    return sendTelegramMessageDetailed(errorMsg);
+  }
+
   if (orders.length === 0) {
     const msg = isRealToss
       ? `🟢 <b>[토스 API] ${tickerStr} 1차 LOC 매수 주문 0건 제출 완료</b>`
-      : `📋 <b>[장전 자동주문 알림]</b>\n\n사이클: <b>${cycleName}</b>\n제출 예정 주문이 없습니다.`;
+      : `📋 <b>[장전 가상 주문 알림]</b>\n\n사이클: <b>${cycleName}</b>\n제출 예정 주문이 없습니다.`;
     return sendTelegramMessageDetailed(msg);
   }
 

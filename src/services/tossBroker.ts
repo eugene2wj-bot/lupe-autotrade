@@ -60,10 +60,11 @@ export async function sendTossLocOrder(params: TossOrderParams): Promise<TossOrd
         rawResponse: resData,
       };
     } else {
+      const errMsg = resData.error?.message || resData.message || (typeof resData.error === 'string' ? resData.error : null) || `HTTP ${res.status} 토스 API 응답 오류`;
       return {
         success: false,
-        orderId: `TOSS_REAL_FALLBACK_${params.ticker}_${Date.now()}`,
-        message: resData.message || resData.error || `HTTP ${res.status} 토스 API 응답`,
+        orderId: `TOSS_REAL_FAIL_${params.ticker}_${Date.now()}`,
+        message: errMsg,
         rawResponse: resData,
       };
     }

@@ -18,7 +18,7 @@ import {
   isWeekend,
   isWithinPreMarketOrderWindow,
 } from '@/utils/usMarketCalendar';
-import type { Cycle, TradeLog } from '@/types/cycle';
+import type { Cycle, Order, TradeLog } from '@/types/cycle';
 import initialCyclesData from '@/data/cycles.json';
 
 /**
@@ -179,6 +179,9 @@ async function executeOrdersForCycle(
 
   // 🟢 auto_orders DB 저장 및 실제 토스 API / 가상 주문 전송
   const createdOrderRecords: any[] = [];
+  const submittedOrders: Order[] = [];
+  const failedOrders: { order: Order; reason: string }[] = [];
+
   for (const o of orders) {
     const rawPrice = typeof o.price === 'number' ? o.price : 0;
     const rawQty = typeof o.qty === 'number' ? o.qty : 0;
@@ -202,11 +205,16 @@ async function executeOrdersForCycle(
       if (tossRes.success) {
         orderStatus = 'submitted';
         tossOrderRef = tossRes.orderId || `TOSS_REAL_${cycle.ticker}_${Date.now()}`;
+        submittedOrders.push(o);
       } else {
         orderStatus = 'failed';
         tossOrderRef = tossRes.orderId || `TOSS_FAIL_${cycle.ticker}_${Date.now()}`;
+        const reason = tossRes.message || '토스 API 주문 전송 실패';
+        failedOrders.push({ order: o, reason });
       }
       tossResponseData = tossRes.rawResponse || { message: tossRes.message };
+    } else {
+      submittedOrders.push(o);
     }
 
     const orderRecord = {
@@ -266,12 +274,35 @@ async function executeOrdersForCycle(
     }
   }
 
+  // 🔴 실제 토스 API 호출 후 전량 실패한 경우 처리
+  if (isRealToss && failedOrders.length > 0 && submittedOrders.length === 0) {
+    const mainErrorReason = failedOrders[0].reason;
+    const failMessage = `🔴 [토스 API 오류] ${cycle.ticker} 주문 전송 실패 (${mainErrorReason})`;
+
+    await notifyOrdersSubmittedDetailed(cycle.name, orders, {
+      isRealToss: true,
+      ticker: cycle.ticker,
+      errorReason: mainErrorReason,
+      isFailed: true,
+    });
+
+    return {
+      cycleId: cycle.id,
+      cycleName: cycle.name,
+      success: false,
+      isRealToss: true,
+      error: mainErrorReason,
+      message: failMessage,
+      count: 0,
+    };
+  }
+
   const successMessage = isRealToss
-    ? `🟢 [토스 API] ${cycle.ticker} 1차 LOC 매수 주문 ${orders.length}건 제출 완료`
+    ? `🟢 [토스 API] ${cycle.ticker} 1차 LOC 매수 주문 ${submittedOrders.length}건 제출 완료`
     : `🧪 [가상 주문] ${cycle.name} (${cycle.ticker}) 가상 주문 ${orders.length}건 생성 완료`;
 
   // 🟢 텔레그램 주문 제출 알림 발송 (명시적 에러 체크 및 토스 API 구분 옵션 전송)
-  const tgResult = await notifyOrdersSubmittedDetailed(cycle.name, orders, { isRealToss, ticker: cycle.ticker });
+  const tgResult = await notifyOrdersSubmittedDetailed(cycle.name, submittedOrders, { isRealToss, ticker: cycle.ticker });
   if (!tgResult.success) {
     console.warn('[AutoTradeAPI] Telegram notification failed:', tgResult.error);
     return {
@@ -281,7 +312,7 @@ async function executeOrdersForCycle(
       isRealToss,
       error: `텔레그램 발송 실패: ${tgResult.error}`,
       message: `🔴 텔레그램 오류: ${tgResult.error}`,
-      count: orders.length,
+      count: submittedOrders.length,
     };
   }
 
@@ -290,8 +321,8 @@ async function executeOrdersForCycle(
     cycleName: cycle.name,
     success: true,
     isRealToss,
-    orders,
-    count: orders.length,
+    orders: submittedOrders,
+    count: submittedOrders.length,
     message: successMessage,
   };
 }
