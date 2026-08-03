@@ -1,0 +1,138 @@
+// -------------------------------------------------------
+// 텔레그램 알림 서비스 (Telegram Bot Integration)
+// 🔒 보안 가드레일: Chat ID 100% 본인 검증 래퍼 적용
+// -------------------------------------------------------
+
+import { getAppSettings } from '@/services/dbService';
+import type { Order, TradeLog } from '@/types/cycle';
+
+/**
+ * 텔레그램 메세지 전송 공통 함수 (보안 가드레일 검증)
+ */
+export async function sendTelegramMessage(
+  message: string,
+  botToken?: string,
+  chatId?: string
+): Promise<boolean> {
+  try {
+    const settings = await getAppSettings();
+
+    const dbToken = settings.telegram_bot_token || process.env.TELEGRAM_BOT_TOKEN;
+    const authorizedChatId = settings.telegram_chat_id || process.env.TELEGRAM_CHAT_ID;
+
+    const token = botToken || dbToken;
+    const targetChatId = chatId || authorizedChatId;
+
+    if (!token || !targetChatId) {
+      console.log('[TelegramService] Telegram botToken or authorized chatId is missing. Skip sending.');
+      return false;
+    }
+
+    // 🔒 보안 가드레일 2: 텔레그램 Chat ID 100% 본인 검증
+    // DB 또는 환경변수에 등록된 authorizedChatId와 전달받은 targetChatId가 불일치할 경우 차단
+    if (authorizedChatId && targetChatId !== authorizedChatId) {
+      console.warn(`[Security Alert] Unauthorized Telegram Chat ID attempt: ${targetChatId} (Authorized: ${authorizedChatId})`);
+      return false;
+    }
+
+    const url = `https://api.telegram.org/bot${token}/sendMessage`;
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        chat_id: targetChatId,
+        text: message,
+        parse_mode: 'HTML',
+      }),
+    });
+
+    if (!res.ok) {
+      const errText = await res.text();
+      console.warn('[TelegramService] Message send failed:', errText);
+      return false;
+    }
+
+    return true;
+  } catch (err) {
+    console.warn('[TelegramService] sendTelegramMessage exception:', err);
+    return false;
+  }
+}
+
+/**
+ * 1. 자동매매 On/Off 상태 변경 알림
+ */
+export async function notifyAutoTradeStatus(
+  cycleName: string,
+  status: boolean,
+  isGlobal = false
+): Promise<boolean> {
+  const targetText = isGlobal ? '전역 자동매매 설정' : `사이클 [${cycleName}]`;
+  const statusText = status ? '🟢 [ON / 활성화]' : '🔴 [OFF / 중지]';
+  const message =
+    `🤖 <b>[루프 자동매매 알림]</b>\n\n` +
+    `대상: <b>${targetText}</b>\n` +
+    `상태: <b>${statusText}</b>\n` +
+    `변경 시각: ${new Date().toLocaleString('ko-KR')}`;
+
+  return sendTelegramMessage(message);
+}
+
+/**
+ * 2. 장전 자동주문 제출 알림
+ */
+export async function notifyOrdersSubmitted(
+  cycleName: string,
+  orders: Order[]
+): Promise<boolean> {
+  if (orders.length === 0) {
+    const msg = `📋 <b>[장전 자동주문 알림]</b>\n\n사이클: <b>${cycleName}</b>\n제출 예정 주문이 없습니다.`;
+    return sendTelegramMessage(msg);
+  }
+
+  const orderLines = orders
+    .map((o) => {
+      const side = o.type === 'buy' ? '🔵 매수' : '🔴 매도';
+      const priceStr = o.price === 0 ? 'MOC' : `$${(o.price / 100).toFixed(2)}`;
+      return `• ${side} | ${o.label} — <b>${priceStr}</b> × ${o.qty}주`;
+    })
+    .join('\n');
+
+  const message =
+    `📋 <b>[장전 자동주문 제출 완료]</b>\n\n` +
+    `사이클: <b>${cycleName}</b>\n` +
+    `제출 시각: ${new Date().toLocaleTimeString('ko-KR')}\n` +
+    `총 주문 건수: <b>${orders.length}건</b>\n\n` +
+    `<b>[주문 목록]</b>\n` +
+    orderLines;
+
+  return sendTelegramMessage(message);
+}
+
+/**
+ * 3. 장 마감 후 체결 갱신(동기화) 알림
+ */
+export async function notifyExecutionSync(
+  cycleName: string,
+  logs: TradeLog[]
+): Promise<boolean> {
+  const logCount = logs.length;
+  const logLines = logs
+    .slice(0, 5)
+    .map((l) => {
+      const side = l.type === 'buy' ? '매수' : '매도';
+      const priceStr = `$${(l.price / 100).toFixed(2)}`;
+      return `• ${l.date} | ${side}(${l.orderType}) <b>${priceStr}</b> × ${l.qty}주`;
+    })
+    .join('\n');
+
+  const message =
+    `🔄 <b>[장마감 체결 동기화 완료]</b>\n\n` +
+    `사이클: <b>${cycleName}</b>\n` +
+    `신규 체결 갱신: <b>${logCount}건</b>\n` +
+    `동기화 시각: ${new Date().toLocaleTimeString('ko-KR')}\n\n` +
+    `<b>[최근 체결 내역]</b>\n` +
+    (logLines || '• 갱신된 신규 체결 건이 없습니다.');
+
+  return sendTelegramMessage(message);
+}
