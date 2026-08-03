@@ -344,7 +344,7 @@ function AutoTradeSettingsInner() {
     }
   };
 
-  // 🧪 [토스 API 가상 주문 테스트]
+  // 🧪 [가상 주문 테스트] (해당일 매매 가이드 수량/가격 기반 실행)
   const handleTestOrderSubmit = async () => {
     const targetCycle = cycles.find((c) => c.id === selectedCycleId) || cycles[0];
     if (!targetCycle) {
@@ -352,17 +352,35 @@ function AutoTradeSettingsInner() {
       return;
     }
 
-    addLog(`🧪 사이클 [${targetCycle.name}] 토스 API 가상 주문 테스트 시작...`);
+    addLog(`🧪 사이클 [${targetCycle.name}] (${targetCycle.ticker}) 가상 주문 실행 중...`);
     const res = await submitSimulatedOrders(targetCycle);
 
     if (res.success) {
-      addLog(`✅ 가상 주문 ${res.count}건 생성 및 auto_orders DB 저장 완료!`);
+      addLog(`✅ [가상 주문 생성 성공] 총 ${res.count}건의 해당일 매매 가이드 주문 생성 및 auto_orders DB 저장 완료!`);
+
+      const orderSummaryLines: string[] = [];
+      if (Array.isArray(res.orders) && res.orders.length > 0) {
+        res.orders.forEach((o: any) => {
+          const sideStr = o.type === 'buy' ? '🔵 매수' : '🔴 매도';
+          const priceStr = o.price === 0 ? 'MOC' : `$${(o.price / 100).toFixed(2)}`;
+          const totalStr = o.price > 0 ? ` (≈$${((o.price * o.qty) / 100).toFixed(2)})` : '';
+          const line = `  • ${sideStr} | ${o.label} — ${priceStr} × ${o.qty}주${totalStr}`;
+          addLog(line);
+          orderSummaryLines.push(line);
+        });
+      }
+
       addLog(`📱 텔레그램 주문 제출보고서 발송 완료`);
-      alert(`[${targetCycle.name}] 가상 주문 ${res.count}건이 제출되었으며 텔레그램으로 알림이 발송되었습니다.`);
+
+      const alertBody = orderSummaryLines.length > 0
+        ? `[생성된 가상 주문 목록]\n${orderSummaryLines.join('\n')}\n\n💾 auto_orders DB (status: 'simulated') 기록 완료\n📱 텔레그램 알림 발송 완료`
+        : '제출 예정 가이드 주문이 없습니다.';
+
+      alert(`✅ [${targetCycle.name}] 해당일 매매 가이드 가상 주문 ${res.count}건 실행 완료!\n\n${alertBody}`);
     } else {
       const errorMsg = res.message || '가상 주문 처리 실패';
       addLog(`🔴 DB/텔레그램 오류: ${errorMsg}`);
-      alert(errorMsg);
+      alert(`🔴 가상 주문 테스트 실패:\n\n${errorMsg}`);
     }
   };
 

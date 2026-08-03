@@ -244,6 +244,13 @@ async function executeOrdersForCycle(
       }
       tossResponseData = tossRes.rawResponse || { message: tossRes.message };
     } else {
+      console.log(`==================================================`);
+      console.log(`🧪 [AutoTradeAPI 가상 주문 생성 (Guide Match)]`);
+      console.log(` 사이클: ${cycle.name} (${cycle.ticker})`);
+      console.log(` 가이드 레이블: ${o.label}`);
+      console.log(` 가이드 계산 가격: $${(rawPrice / 100).toFixed(2)} (${rawPrice} 센트)`);
+      console.log(` 가이드 계산 수량: ${rawQty}주`);
+      console.log(`==================================================`);
       submittedOrders.push(o);
     }
 
