@@ -11,6 +11,7 @@ import {
   notifyOrdersSubmittedDetailed,
   notifyExecutionSync,
 } from '@/services/telegramService';
+import { sendTossLocOrder } from '@/services/tossBroker';
 import {
   getNyseTime,
   isUsMarketHoliday,
@@ -21,22 +22,34 @@ import type { Cycle, TradeLog } from '@/types/cycle';
 import initialCyclesData from '@/data/cycles.json';
 
 /**
- * 단일 사이클 자동 가상 주문 처리 헬퍼 함수
+ * 단일 사이클 자동 가상/실전 주문 처리 헬퍼 함수
  */
 async function executeOrdersForCycle(
   cycle: Cycle,
-  is_global_auto_trade: boolean,
+  settings: any,
   forceTest: boolean,
   nyTime: Date,
   nyDateStr: string,
   todayStartIso: string
 ) {
+  const is_global_auto_trade = settings?.is_global_auto_trade ?? settings?.isGlobalAutoTrade ?? false;
+
+  const tossAppKey = (settings?.toss_app_key || settings?.tossAppKey || '').trim();
+  const tossAppSecret = (settings?.toss_app_secret || settings?.tossAppSecret || '').trim();
+  const tossAccountNo = (settings?.toss_account_no || settings?.tossAccountNo || '').trim();
+  const isVirtualMode = Boolean(settings?.is_virtual_trade || settings?.isVirtualTrade || settings?.is_simulated || settings?.isSimulated);
+
+  // DB 설정에 토스 API 키가 모두 존재하고 가상매매 모드가 OFF일 때만 '실제 토스 API 주문 전송'
+  const hasTossKeys = Boolean(tossAppKey && tossAppSecret && tossAccountNo);
+  const isRealToss = hasTossKeys && !isVirtualMode;
+
   // 🟢 전역/개별 자동매매 활성화 검증
   if (!is_global_auto_trade && !forceTest) {
     return {
       cycleId: cycle.id,
       cycleName: cycle.name,
       success: false,
+      isRealToss,
       error: '전역 자동매매 OFF',
       message: '전역 자동매매가 OFF 상태입니다. 주문 생성이 차단되었습니다.',
       count: 0,
@@ -47,6 +60,7 @@ async function executeOrdersForCycle(
       cycleId: cycle.id,
       cycleName: cycle.name,
       success: false,
+      isRealToss,
       error: '개별 자동매매 OFF',
       message: `[${cycle.name}] 사이클의 개별 자동매매가 OFF 상태입니다.`,
       count: 0,
@@ -71,6 +85,7 @@ async function executeOrdersForCycle(
       cycleId: cycle.id,
       cycleName: cycle.name,
       success: false,
+      isRealToss,
       isMarketClosed: true,
       error: `미국 증시 휴장일(${reason})`,
       message: `🏖️ 오늘은 미국 증시 휴장일(${reason})입니다. 주문을 스킵합니다.`,
@@ -85,6 +100,7 @@ async function executeOrdersForCycle(
       cycleId: cycle.id,
       cycleName: cycle.name,
       success: false,
+      isRealToss,
       isOutsideWindow: true,
       error: '미국 장전 시간대 아님',
       message: `⏳ 미국 현지 장전 주문 시각(08:30 ~ 09:30 ET)이 아닙니다. (현재: ${nyTime.toLocaleTimeString('en-US')} ET)`,
@@ -108,6 +124,7 @@ async function executeOrdersForCycle(
       cycleId: cycle.id,
       cycleName: cycle.name,
       success: false,
+      isRealToss,
       error: '중복 주문 방지 Lock',
       message: `🛑 [중복 주문 방지 Lock] 오늘(${nyDateStr} ET) [${cycle.name}] 사이클에 이미 제출된 주문이 존재합니다.`,
       count: 0,
@@ -123,6 +140,7 @@ async function executeOrdersForCycle(
       cycleId: cycle.id,
       cycleName: cycle.name,
       success: true,
+      isRealToss,
       orders: [],
       count: 0,
       message: `[${cycle.name}] 생성된 가이드 주문이 없습니다.`,
@@ -152,17 +170,44 @@ async function executeOrdersForCycle(
       cycleId: cycle.id,
       cycleName: cycle.name,
       success: false,
+      isRealToss,
       error: 'Circuit Breaker 발동',
       message: `🚨 Circuit Breaker 발동: 당일 매수 주문액($${attemptedDollars})이 1일 한도($${limitDollars})를 초과하여 주문이 차단되었습니다.`,
       count: 0,
     };
   }
 
-  // 🟢 auto_orders DB 저장 (정형화된 필드 규격 준수 & undefined ➔ 기본값 변환)
+  // 🟢 auto_orders DB 저장 및 실제 토스 API / 가상 주문 전송
   const createdOrderRecords: any[] = [];
   for (const o of orders) {
     const rawPrice = typeof o.price === 'number' ? o.price : 0;
     const rawQty = typeof o.qty === 'number' ? o.qty : 0;
+
+    let orderStatus = 'simulated';
+    let tossOrderRef = `TOSS_SIMULATED_${cycle.ticker}_${Date.now()}`;
+    let tossResponseData: any = null;
+
+    if (isRealToss) {
+      const tossRes = await sendTossLocOrder({
+        appKey: tossAppKey,
+        appSecret: tossAppSecret,
+        accountNo: tossAccountNo,
+        ticker: cycle.ticker,
+        side: o.type === 'buy' ? 'BUY' : 'SELL',
+        orderType: 'LOC',
+        price: rawPrice,
+        qty: rawQty,
+      });
+
+      if (tossRes.success) {
+        orderStatus = 'submitted';
+        tossOrderRef = tossRes.orderId || `TOSS_REAL_${cycle.ticker}_${Date.now()}`;
+      } else {
+        orderStatus = 'failed';
+        tossOrderRef = tossRes.orderId || `TOSS_FAIL_${cycle.ticker}_${Date.now()}`;
+      }
+      tossResponseData = tossRes.rawResponse || { message: tossRes.message };
+    }
 
     const orderRecord = {
       cycle_id: cycle.id || '',
@@ -173,12 +218,13 @@ async function executeOrdersForCycle(
       qty: rawQty,
       target_price: rawPrice,
       order_date: nyDateStr || new Date().toISOString().slice(0, 10),
-      status: 'simulated',
+      status: orderStatus,
       order_response: {
-        tossOrderRef: `TOSS_SERVER_${cycle.ticker}_${Date.now()}`,
-        apiSource: 'server-route',
+        tossOrderRef,
+        apiSource: isRealToss ? 'toss-real-api' : 'server-route-simulated',
         nyTimeEt: nyTime.toLocaleString('en-US'),
         executedAt: new Date().toISOString(),
+        tossResponse: tossResponseData,
       },
       created_at: new Date().toISOString(),
     };
@@ -189,7 +235,6 @@ async function executeOrdersForCycle(
       .select('*')
       .single();
 
-    // auto_orders 테이블 스키마에 order_response 컬럼이 존재하지 않는 경우 폴백 처리
     if (orderInsErr && orderInsErr.message.includes('order_response')) {
       console.warn('[AutoTradeAPI] order_response column missing in auto_orders. Retrying without order_response...');
       const fallbackRecord = { ...orderRecord };
@@ -209,6 +254,7 @@ async function executeOrdersForCycle(
         cycleId: cycle.id,
         cycleName: cycle.name,
         success: false,
+        isRealToss,
         error: `DB 저장 실패: ${orderInsErr.message}`,
         message: `🔴 DB 저장 실패: auto_orders 테이블 저장 중 오류가 발생했습니다. (${orderInsErr.message})`,
         count: 0,
@@ -220,14 +266,19 @@ async function executeOrdersForCycle(
     }
   }
 
-  // 🟢 텔레그램 주문 제출 알림 발송 (명시적 에러 체크)
-  const tgResult = await notifyOrdersSubmittedDetailed(cycle.name, orders);
+  const successMessage = isRealToss
+    ? `🟢 [토스 API] ${cycle.ticker} 1차 LOC 매수 주문 ${orders.length}건 제출 완료`
+    : `🧪 [가상 주문] ${cycle.name} (${cycle.ticker}) 가상 주문 ${orders.length}건 생성 완료`;
+
+  // 🟢 텔레그램 주문 제출 알림 발송 (명시적 에러 체크 및 토스 API 구분 옵션 전송)
+  const tgResult = await notifyOrdersSubmittedDetailed(cycle.name, orders, { isRealToss, ticker: cycle.ticker });
   if (!tgResult.success) {
     console.warn('[AutoTradeAPI] Telegram notification failed:', tgResult.error);
     return {
       cycleId: cycle.id,
       cycleName: cycle.name,
       success: false,
+      isRealToss,
       error: `텔레그램 발송 실패: ${tgResult.error}`,
       message: `🔴 텔레그램 오류: ${tgResult.error}`,
       count: orders.length,
@@ -238,9 +289,10 @@ async function executeOrdersForCycle(
     cycleId: cycle.id,
     cycleName: cycle.name,
     success: true,
+    isRealToss,
     orders,
     count: orders.length,
-    message: `[${cycle.name}] 가상 주문 ${orders.length}건이 안전하게 DB에 저장되고 텔레그램으로 알림이 발송되었습니다.`,
+    message: successMessage,
   };
 }
 
@@ -626,7 +678,7 @@ export async function POST(request: Request) {
             }
           : clientCycle!;
 
-        const result = await executeOrdersForCycle(cycle, is_global_auto_trade, forceTest, nyTime, nyDateStr, todayStartIso);
+        const result = await executeOrdersForCycle(cycle, settings, forceTest, nyTime, nyDateStr, todayStartIso);
         return NextResponse.json(result, { status: result.success ? 200 : 400 });
       }
 
@@ -693,16 +745,18 @@ export async function POST(request: Request) {
           logs,
         };
 
-        const res = await executeOrdersForCycle(cycleObj, is_global_auto_trade, forceTest, nyTime, nyDateStr, todayStartIso);
+        const res = await executeOrdersForCycle(cycleObj, settings, forceTest, nyTime, nyDateStr, todayStartIso);
         results.push(res);
       }
 
       const successCount = results.filter((r) => r.success).length;
       const totalOrders = results.reduce((sum, r) => sum + (r.count || 0), 0);
+      const isRealTossAny = results.some((r) => r.isRealToss);
+      const prefix = isRealTossAny ? '🟢 [토스 API]' : '🧪 [가상 주문]';
 
       return NextResponse.json({
         success: true,
-        message: `전체 ${activeCycles.length}개 활성 사이클 중 ${successCount}개 사이클 자동주문 완료 (총 ${totalOrders}건 생성)`,
+        message: `${prefix} 전체 ${activeCycles.length}개 활성 사이클 중 ${successCount}개 사이클 자동주문 완료 (총 ${totalOrders}건 생성)`,
         totalCycles: activeCycles.length,
         successCount,
         totalOrders,

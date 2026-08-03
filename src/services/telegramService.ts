@@ -124,10 +124,16 @@ export async function notifyAutoTradeStatus(
  */
 export async function notifyOrdersSubmittedDetailed(
   cycleName: string,
-  orders: Order[]
+  orders: Order[],
+  options?: { isRealToss?: boolean; ticker?: string }
 ): Promise<TelegramSendResult> {
+  const isRealToss = options?.isRealToss ?? false;
+  const tickerStr = (options?.ticker || '').toUpperCase() || cycleName;
+
   if (orders.length === 0) {
-    const msg = `📋 <b>[장전 자동주문 알림]</b>\n\n사이클: <b>${cycleName}</b>\n제출 예정 주문이 없습니다.`;
+    const msg = isRealToss
+      ? `🟢 <b>[토스 API] ${tickerStr} 1차 LOC 매수 주문 0건 제출 완료</b>`
+      : `📋 <b>[장전 자동주문 알림]</b>\n\n사이클: <b>${cycleName}</b>\n제출 예정 주문이 없습니다.`;
     return sendTelegramMessageDetailed(msg);
   }
 
@@ -139,22 +145,29 @@ export async function notifyOrdersSubmittedDetailed(
     })
     .join('\n');
 
-  const message =
-    `📋 <b>[장전 자동주문 제출 완료]</b>\n\n` +
-    `사이클: <b>${cycleName}</b>\n` +
-    `제출 시각: ${new Date().toLocaleTimeString('ko-KR')}\n` +
-    `총 주문 건수: <b>${orders.length}건</b>\n\n` +
-    `<b>[주문 목록]</b>\n` +
-    orderLines;
+  const message = isRealToss
+    ? `🟢 <b>[토스 API] ${tickerStr} 1차 LOC 매수 주문 ${orders.length}건 제출 완료</b>\n\n` +
+      `사이클: <b>${cycleName} (${tickerStr})</b>\n` +
+      `제출 시각: ${new Date().toLocaleTimeString('ko-KR')}\n` +
+      `총 주문 건수: <b>${orders.length}건</b> (실제 토스 API 연동)\n\n` +
+      `<b>[주문 목록]</b>\n` +
+      orderLines
+    : `📋 <b>[장전 가상 주문 제출 완료]</b>\n\n` +
+      `사이클: <b>${cycleName} (${tickerStr})</b>\n` +
+      `제출 시각: ${new Date().toLocaleTimeString('ko-KR')}\n` +
+      `총 주문 건수: <b>${orders.length}건</b> (가상 주문 모드)\n\n` +
+      `<b>[주문 목록]</b>\n` +
+      orderLines;
 
   return sendTelegramMessageDetailed(message);
 }
 
 export async function notifyOrdersSubmitted(
   cycleName: string,
-  orders: Order[]
+  orders: Order[],
+  options?: { isRealToss?: boolean; ticker?: string }
 ): Promise<boolean> {
-  const res = await notifyOrdersSubmittedDetailed(cycleName, orders);
+  const res = await notifyOrdersSubmittedDetailed(cycleName, orders, options);
   return res.success;
 }
 

@@ -9,6 +9,70 @@ export interface TossOrderResult {
   success: boolean;
   orderId?: string;
   message?: string;
+  rawResponse?: any;
+}
+
+export interface TossOrderParams {
+  appKey: string;
+  appSecret: string;
+  accountNo: string;
+  ticker: string;
+  side: 'BUY' | 'SELL';
+  orderType: string;
+  price: number; // 원화 센트 단위 (x100)
+  qty: number;
+}
+
+/**
+ * 토스증권 해외주식 LOC 매수/매도 API 직접 호출 헬퍼
+ */
+export async function sendTossLocOrder(params: TossOrderParams): Promise<TossOrderResult> {
+  try {
+    const url = 'https://openapi.tossinvest.com/v1/trading/orders/overseas';
+    const dollarsPrice = params.price > 0 ? (params.price / 100).toFixed(2) : undefined;
+
+    const bodyPayload = {
+      accountNo: params.accountNo,
+      ticker: params.ticker.toUpperCase(),
+      side: params.side,
+      orderType: params.orderType || 'LOC',
+      price: dollarsPrice,
+      qty: params.qty,
+    };
+
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-toss-app-key': params.appKey,
+        'x-toss-app-secret': params.appSecret,
+        'x-toss-account-no': params.accountNo,
+      },
+      body: JSON.stringify(bodyPayload),
+    });
+
+    const resData = await res.json().catch(() => ({}));
+    if (res.ok && (resData.success !== false && !resData.error)) {
+      return {
+        success: true,
+        orderId: resData.orderId || resData.orderRef || `TOSS_REAL_${params.ticker}_${Date.now()}`,
+        message: resData.message || '토스 API LOC 주문 성공',
+        rawResponse: resData,
+      };
+    } else {
+      return {
+        success: false,
+        orderId: `TOSS_REAL_FALLBACK_${params.ticker}_${Date.now()}`,
+        message: resData.message || resData.error || `HTTP ${res.status} 토스 API 응답`,
+        rawResponse: resData,
+      };
+    }
+  } catch (err: any) {
+    return {
+      success: false,
+      message: err?.message || '토스 API 통신 오류',
+    };
+  }
 }
 
 /**
@@ -104,3 +168,4 @@ export async function syncExecutions(cycle: Cycle): Promise<{
     };
   }
 }
+
