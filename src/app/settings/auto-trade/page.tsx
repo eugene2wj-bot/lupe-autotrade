@@ -3,6 +3,7 @@
 import React, { useState, useEffect, Component, type ReactNode } from 'react';
 import Link from 'next/link';
 import { useCycleStore } from '@/store/cycleStore';
+import { NewCycleModal } from '@/components/modals/NewCycleModal';
 import { notifyAutoTradeStatus, sendTelegramMessage } from '@/services/telegramService';
 import { submitSimulatedOrders, syncExecutions } from '@/services/tossBroker';
 import type { AppSettings, Cycle } from '@/types/cycle';
@@ -82,14 +83,137 @@ export default function AutoTradeSettingsPage() {
 }
 
 function AutoTradeSettingsInner() {
-  const { cycles, updateCycle } = useCycleStore();
+  const {
+    cycles,
+    addCycle,
+    updateCycle,
+    deleteCycle,
+    isNewCycleModalOpen,
+    editingCycleId,
+    openNewCycleModal,
+    openEditCycleModal,
+    closeModal,
+  } = useCycleStore();
+
   const [settings, setSettings] = useState<AppSettings>({ ...DEFAULT_SETTINGS });
   const [loadError, setLoadError] = useState<string | null>(null);
 
   const [isLoading, setIsLoading] = useState(true);
   const [isSaving, setIsSaving] = useState(false);
+  const [isModalSubmitting, setIsModalSubmitting] = useState(false);
   const [testLog, setTestLog] = useState<string[]>([]);
   const [selectedCycleId, setSelectedCycleId] = useState<string | null>(null);
+
+  // ➕ TQQQ 1차 빠른 추가
+  const handleAddTqqqCycle = async () => {
+    const newCycle: Cycle = {
+      id: crypto.randomUUID(),
+      name: 'TQQQ 1차',
+      ticker: 'TQQQ',
+      version: 'V4.0',
+      splitCount: 40,
+      maxPercent: 20,
+      principal: 1000000,
+      compoundMode: 'full',
+      status: 'active',
+      startDate: new Date().toISOString().slice(0, 10),
+      commissionRate: 0.1,
+      autoTradeEnabled: true,
+      logs: [],
+    };
+    addLog(`➕ [TQQQ 1차] 사이클 Supabase DB 저장 요청...`);
+    await addCycle(newCycle);
+    addLog(`✅ [TQQQ 1차] 사이클 Supabase DB(cycles) 저장 완료!`);
+    alert(`✅ [TQQQ 1차] 사이클이 Supabase DB(cycles)에 정상 등록되었습니다.`);
+  };
+
+  // ➕ SOXL 1차 빠른 추가
+  const handleAddSoxlCycle = async () => {
+    const newCycle: Cycle = {
+      id: crypto.randomUUID(),
+      name: 'SOXL 1차',
+      ticker: 'SOXL',
+      version: 'V4.0',
+      splitCount: 40,
+      maxPercent: 20,
+      principal: 1000000,
+      compoundMode: 'full',
+      status: 'active',
+      startDate: new Date().toISOString().slice(0, 10),
+      commissionRate: 0.1,
+      autoTradeEnabled: true,
+      logs: [],
+    };
+    addLog(`➕ [SOXL 1차] 사이클 Supabase DB 저장 요청...`);
+    await addCycle(newCycle);
+    addLog(`✅ [SOXL 1차] 사이클 Supabase DB(cycles) 저장 완료!`);
+    alert(`✅ [SOXL 1차] 사이클이 Supabase DB(cycles)에 정상 등록되었습니다.`);
+  };
+
+  // 🗑️ 사이클 삭제
+  const handleDeleteCycle = async (cycle: Cycle) => {
+    if (confirm(`정말 "${cycle.name}" (${cycle.ticker}) 사이클을 DB에서 삭제하시겠습니까?\n\n(연관된 체결 기록 및 일별 시세도 함께 삭제됩니다)`)) {
+      addLog(`🗑️ 사이클 [${cycle.name}] Supabase DB 삭제 진행 중...`);
+      await deleteCycle(cycle.id);
+      addLog(`✅ 사이클 [${cycle.name}] Supabase DB 삭제 완료`);
+      alert(`✅ "${cycle.name}" 사이클이 DB에서 삭제되었습니다.`);
+    }
+  };
+
+  // 💾 모달 폼 제출 (생성/수정)
+  const handleCycleModalSubmit = async (
+    settingsObj: Omit<Cycle, 'id' | 'logs'>,
+    importLogs?: Array<{
+      date: string; type: 'buy' | 'sell'; orderType: string;
+      price: number; qty: number; memo?: string; commissionRate: number;
+    }>
+  ) => {
+    setIsModalSubmitting(true);
+    try {
+      if (editingCycleId) {
+        await updateCycle(editingCycleId, settingsObj);
+        addLog(`✅ 사이클 [${settingsObj.name}] 수정사항 DB 저장 완료`);
+        alert(`✅ 사이클 [${settingsObj.name}] 수정이 성공적으로 DB에 저장되었습니다.`);
+      } else {
+        const newCycle: Cycle = {
+          ...settingsObj,
+          id: crypto.randomUUID(),
+          logs: (importLogs ?? []).map((l) => ({
+            id: crypto.randomUUID(),
+            cycleId: '',
+            date: l.date,
+            type: l.type,
+            orderType: l.orderType as Cycle['logs'][number]['orderType'],
+            price: l.price,
+            qty: l.qty,
+            memo: l.memo ?? null,
+            profit: null,
+            commissionRate: l.commissionRate,
+            batchId: crypto.randomUUID(),
+          })),
+        };
+        newCycle.logs = newCycle.logs.map((l) => ({ ...l, cycleId: newCycle.id }));
+        await addCycle(newCycle);
+        addLog(`✅ 신규 사이클 [${newCycle.name}] (${newCycle.ticker}) DB 저장 완료`);
+        alert(`✅ 신규 사이클 [${newCycle.name}]이 DB에 등록되었습니다.`);
+      }
+      closeModal();
+    } catch (err: any) {
+      alert(`🔴 사이클 저장 오류: ${err?.message || err}`);
+    } finally {
+      setIsModalSubmitting(false);
+    }
+  };
+
+  const handleModalDelete = async () => {
+    if (editingCycleId) {
+      const target = cycles.find((c) => c.id === editingCycleId);
+      if (target) {
+        await handleDeleteCycle(target);
+        closeModal();
+      }
+    }
+  };
 
   // 🔒 보안 PIN 번호 인증 및 마스킹 상태
   const [isUnlocked, setIsUnlocked] = useState(false);
@@ -639,45 +763,108 @@ function AutoTradeSettingsInner() {
           </button>
         </div>
 
-        {/* 개별 사이클 자동매매 목록 */}
-        <div className="space-y-2">
-          <h3 className="text-xs font-bold text-gray-500 dark:text-gray-400 uppercase tracking-wider">
-            개별 사이클 자동매매 제어
-          </h3>
+        {/* 개별 사이클 자동매매 및 C.R.U.D 관리 */}
+        <div className="space-y-3">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <h3 className="text-xs font-bold text-gray-500 dark:text-gray-400 uppercase tracking-wider">
+              개별 사이클 C.R.U.D & DB 실시간 연동 관리
+            </h3>
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                onClick={handleAddTqqqCycle}
+                className="px-2.5 py-1 bg-indigo-50 dark:bg-indigo-950/60 hover:bg-indigo-100 text-indigo-600 dark:text-indigo-400 font-bold text-xs rounded-lg transition-colors border border-indigo-200 dark:border-indigo-800 flex items-center gap-1"
+              >
+                <span>➕</span> [TQQQ 1차] DB 등록
+              </button>
+              <button
+                type="button"
+                onClick={handleAddSoxlCycle}
+                className="px-2.5 py-1 bg-blue-50 dark:bg-blue-950/60 hover:bg-blue-100 text-blue-600 dark:text-blue-400 font-bold text-xs rounded-lg transition-colors border border-blue-200 dark:border-blue-800 flex items-center gap-1"
+              >
+                <span>➕</span> [SOXL 1차] DB 등록
+              </button>
+              <button
+                type="button"
+                onClick={openNewCycleModal}
+                className="px-2.5 py-1 bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs rounded-lg transition-colors shadow-xs flex items-center gap-1"
+              >
+                <span>➕</span> 새 사이클 직접 등록
+              </button>
+            </div>
+          </div>
+
           <div className="divide-y divide-gray-100 dark:divide-gray-800 border border-gray-100 dark:border-gray-800 rounded-xl overflow-hidden">
-            {cycles.map((cycle) => {
-              const isEnabled = cycle.autoTradeEnabled ?? true;
-              return (
-                <div key={cycle.id} className="flex items-center justify-between px-4 py-3 bg-white dark:bg-gray-900">
-                  <div>
-                    <span className="text-sm font-bold text-gray-900 dark:text-gray-50">
-                      {cycle.name}
-                    </span>
-                    <span className="text-xs text-gray-400 dark:text-gray-500 ml-2">
-                      {cycle.ticker} · {cycle.version}
-                    </span>
+            {cycles.length > 0 ? (
+              cycles.map((cycle) => {
+                const isEnabled = cycle.autoTradeEnabled ?? true;
+                const principalDollars = cycle.principal ? (cycle.principal / 100).toLocaleString() : '0';
+                return (
+                  <div key={cycle.id} className="flex flex-wrap items-center justify-between gap-3 px-4 py-3 bg-white dark:bg-gray-900">
+                    <div className="flex items-center gap-3">
+                      <span className={`text-xs px-2 py-0.5 rounded-md font-bold ${cycle.ticker === 'TQQQ' ? 'bg-indigo-100 text-indigo-700 dark:bg-indigo-950 dark:text-indigo-300' : 'bg-blue-100 text-blue-700 dark:bg-blue-950 dark:text-blue-300'}`}>
+                        {cycle.ticker}
+                      </span>
+                      <div>
+                        <div className="flex items-center gap-2">
+                          <span className="text-sm font-bold text-gray-900 dark:text-gray-50">
+                            {cycle.name}
+                          </span>
+                          <span className="text-xs text-gray-400 dark:text-gray-500">
+                            {cycle.version} · {cycle.splitCount}분할 · ${principalDollars}
+                          </span>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="flex items-center gap-3">
+                      {/* 편집 버튼 */}
+                      <button
+                        type="button"
+                        onClick={() => openEditCycleModal(cycle.id)}
+                        className="px-2.5 py-1 text-xs font-semibold text-gray-600 hover:text-indigo-600 dark:text-gray-400 dark:hover:text-indigo-400 bg-gray-100 dark:bg-gray-800 rounded-lg transition-colors"
+                      >
+                        ✏️ 수정
+                      </button>
+
+                      {/* 삭제 버튼 */}
+                      <button
+                        type="button"
+                        onClick={() => handleDeleteCycle(cycle)}
+                        className="px-2.5 py-1 text-xs font-semibold text-rose-600 hover:text-rose-700 dark:text-rose-400 bg-rose-50 dark:bg-rose-950/40 rounded-lg transition-colors"
+                      >
+                        🗑️ 삭제
+                      </button>
+
+                      {/* 자동매매 ON/OFF 토글 */}
+                      <div className="flex items-center gap-1.5 pl-2 border-l border-gray-100 dark:border-gray-800">
+                        <span className={`text-xs font-bold ${isEnabled ? 'text-indigo-500' : 'text-gray-400'}`}>
+                          {isEnabled ? 'ON' : 'OFF'}
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => handleCycleToggle(cycle)}
+                          className={`relative inline-flex h-6 w-10 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-hidden ${
+                            isEnabled ? 'bg-indigo-500' : 'bg-gray-300 dark:bg-gray-700'
+                          }`}
+                        >
+                          <span
+                            className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow-sm ring-0 transition duration-200 ease-in-out ${
+                              isEnabled ? 'translate-x-4' : 'translate-x-0'
+                            }`}
+                          />
+                        </button>
+                      </div>
+                    </div>
                   </div>
-                  <div className="flex items-center gap-2">
-                    <span className={`text-xs font-bold ${isEnabled ? 'text-indigo-500' : 'text-gray-400'}`}>
-                      {isEnabled ? '자동매매 ON' : '중지됨'}
-                    </span>
-                    <button
-                      type="button"
-                      onClick={() => handleCycleToggle(cycle)}
-                      className={`relative inline-flex h-6 w-10 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-hidden ${
-                        isEnabled ? 'bg-indigo-500' : 'bg-gray-300 dark:bg-gray-700'
-                      }`}
-                    >
-                      <span
-                        className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow-sm ring-0 transition duration-200 ease-in-out ${
-                          isEnabled ? 'translate-x-4' : 'translate-x-0'
-                        }`}
-                      />
-                    </button>
-                  </div>
-                </div>
-              );
-            })}
+                );
+              })
+            ) : (
+              <div className="p-8 text-center bg-white dark:bg-gray-900">
+                <p className="text-sm font-semibold text-gray-500 dark:text-gray-400">등록된 사이클이 없습니다.</p>
+                <p className="text-xs text-gray-400 dark:text-gray-500 mt-1">위의 [➕ [TQQQ 1차] DB 등록] 버튼을 눌러 첫 사이클을 등록해보세요.</p>
+              </div>
+            )}
           </div>
         </div>
       </div>
@@ -985,6 +1172,16 @@ function AutoTradeSettingsInner() {
             </form>
           </div>
         </div>
+      )}
+      {/* 사이클 생성 / 편집 모달 */}
+      {isNewCycleModalOpen && (
+        <NewCycleModal
+          cycle={editingCycleId ? cycles.find((c) => c.id === editingCycleId) : undefined}
+          onSubmit={handleCycleModalSubmit}
+          onDelete={editingCycleId ? handleModalDelete : undefined}
+          onCancel={closeModal}
+          isSubmitting={isModalSubmitting}
+        />
       )}
     </div>
   );

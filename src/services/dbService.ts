@@ -167,27 +167,50 @@ export async function saveCycle(cycle: Cycle): Promise<boolean> {
     const payload = {
       id: cycle.id,
       name: cycle.name,
-      ticker: cycle.ticker,
+      ticker: (cycle.ticker || '').toUpperCase(),
       version: cycle.version,
       split_count: cycle.splitCount,
       max_percent: cycle.maxPercent,
       principal: cycle.principal,
       compound_mode: cycle.compoundMode,
-      status: cycle.status,
-      start_date: cycle.startDate,
-      commission_rate: cycle.commissionRate,
+      status: cycle.status || 'active',
+      start_date: cycle.startDate || new Date().toISOString().slice(0, 10),
+      commission_rate: cycle.commissionRate ?? 0.1,
       auto_trade_enabled: cycle.autoTradeEnabled ?? true,
+      is_active: cycle.status === 'active',
       updated_at: new Date().toISOString(),
     };
 
     const { error } = await supabase.from('cycles').upsert(payload);
     if (error) {
-      console.warn('[DBService] saveCycle error:', error.message);
+      console.error('[DBService] saveCycle error:', error.message);
       return false;
     }
+
+    if (cycle.logs && cycle.logs.length > 0) {
+      const logsPayload = cycle.logs.map((l) => ({
+        id: l.id,
+        cycle_id: cycle.id,
+        date: l.date,
+        type: l.type,
+        order_type: l.orderType,
+        price: l.price,
+        qty: l.qty,
+        memo: l.memo ?? null,
+        profit: l.profit ?? null,
+        commission_rate: l.commissionRate ?? cycle.commissionRate,
+        batch_id: l.batchId || l.id,
+      }));
+      const { error: logsErr } = await supabase.from('trade_logs').upsert(logsPayload);
+      if (logsErr) {
+        console.warn('[DBService] trade_logs upsert warning:', logsErr.message);
+      }
+    }
+
+    console.log(`✅ [DBService] saveCycle succeeded for ${cycle.name} (${cycle.ticker})`);
     return true;
-  } catch (err) {
-    console.warn('[DBService] saveCycle failed:', err);
+  } catch (err: any) {
+    console.error('[DBService] saveCycle exception:', err?.message || err);
     return false;
   }
 }
@@ -228,11 +251,18 @@ export async function addTradeLog(log: TradeLog): Promise<boolean> {
  */
 export async function deleteCycleFromDb(id: string): Promise<boolean> {
   try {
+    await supabase.from('daily_records').delete().eq('cycle_id', id);
+    await supabase.from('auto_orders').delete().eq('cycle_id', id);
     await supabase.from('trade_logs').delete().eq('cycle_id', id);
     const { error } = await supabase.from('cycles').delete().eq('id', id);
-    return !error;
-  } catch (err) {
-    console.warn('[DBService] deleteCycle failed:', err);
+    if (error) {
+      console.error('[DBService] deleteCycleFromDb error:', error.message);
+      return false;
+    }
+    console.log(`✅ [DBService] deleteCycleFromDb succeeded for cycle id: ${id}`);
+    return true;
+  } catch (err: any) {
+    console.error('[DBService] deleteCycleFromDb exception:', err?.message || err);
     return false;
   }
 }

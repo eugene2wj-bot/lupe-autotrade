@@ -113,16 +113,16 @@ export const useCycleStore = create<CycleStore>()(
       },
 
       updateCycle: async (id, updates) => {
-        set((state) => {
-          const updatedList = state.cycles.map((c) =>
-            c.id === id ? { ...c, ...updates } : c
-          );
-          const target = updatedList.find((c) => c.id === id);
-          if (target) {
-            saveCycleDb(target);
-          }
-          return { cycles: updatedList };
-        });
+        const currentCycles = get().cycles;
+        const target = currentCycles.find((c) => c.id === id);
+        if (!target) return;
+
+        const updatedTarget = { ...target, ...updates };
+        set((state) => ({
+          cycles: state.cycles.map((c) => (c.id === id ? updatedTarget : c)),
+        }));
+
+        await saveCycleDb(updatedTarget);
       },
 
       deleteCycle: async (id) => {
