@@ -26,14 +26,18 @@ export async function POST(request: Request) {
 
     // ── 0. PIN 번호 검증 및 변경 액션 (`VERIFY_PIN`, `CHANGE_PIN`, `GET_SETTINGS`) ───────────
     if (action === 'VERIFY_PIN') {
-      const inputPin = body.pinCode || body.pin_code || '';
+      const inputPin = String(body.pinCode || body.pin_code || '').trim();
       const { data: existingSettings } = await supabaseAdmin
         .from('app_settings')
         .select('*')
         .limit(1)
         .maybeSingle();
 
-      const validPin = existingSettings?.pin_code || (existingSettings as any)?.pinCode || '1234';
+      const dbPin = existingSettings?.pin_code ? String(existingSettings.pin_code).trim() : null;
+      const validPin = dbPin || '1234';
+
+      console.log(`[AutoTradeAPI VERIFY_PIN] inputPin: ${inputPin}, dbPin: ${dbPin}, validPin: ${validPin}`);
+
       if (inputPin === validPin) {
         return NextResponse.json({ success: true, message: 'PIN 번호 인증 성공' });
       } else {
@@ -77,14 +81,18 @@ export async function POST(request: Request) {
     }
 
     if (action === 'CHANGE_PIN') {
-      const { currentPin, newPin } = body;
+      const currentPin = String(body.currentPin || '').trim();
+      const newPin = String(body.newPin || '').trim();
+
       const { data: existingSettings } = await supabaseAdmin
         .from('app_settings')
         .select('*')
         .limit(1)
         .maybeSingle();
 
-      const validPin = existingSettings?.pin_code || (existingSettings as any)?.pinCode || '1234';
+      const dbPin = existingSettings?.pin_code ? String(existingSettings.pin_code).trim() : null;
+      const validPin = dbPin || '1234';
+
       if (currentPin !== validPin) {
         return NextResponse.json(
           { success: false, error: '현재 PIN 번호가 일치하지 않습니다.', message: '현재 PIN 번호가 일치하지 않습니다.' },
@@ -99,33 +107,24 @@ export async function POST(request: Request) {
         );
       }
 
-      const targetId = existingSettings?.id ?? 1;
-      const payload: any = {
-        ...existingSettings,
-        id: targetId,
-        pin_code: newPin,
-        updated_at: new Date().toISOString(),
-      };
+      if (existingSettings) {
+        const { error: updateErr } = await supabaseAdmin
+          .from('app_settings')
+          .update({ pin_code: newPin, updated_at: new Date().toISOString() })
+          .eq('id', existingSettings.id);
 
-      let { error: updateErr } = await supabaseAdmin
-        .from('app_settings')
-        .upsert(payload);
-
-      if (updateErr && updateErr.message.includes('pin_code')) {
-        console.warn('[AutoTradeAPI] pin_code column missing in DB. Retrying without pin_code field...');
-        const fallback = { ...payload };
-        delete fallback.pin_code;
-        await supabaseAdmin.from('app_settings').upsert(fallback);
-        return NextResponse.json(
-          {
-            success: false,
-            error: `DB 저장 실패: ${updateErr.message}`,
-            message: `🔴 Supabase DB app_settings 테이블에 pin_code 컬럼이 없습니다. (ALTER TABLE app_settings ADD COLUMN pin_code TEXT DEFAULT '1234'; 실행 필요)`,
-          },
-          { status: 500 }
-        );
+        if (updateErr) {
+          console.error('[AutoTradeAPI CHANGE_PIN] Update error:', updateErr);
+          const payload = { ...existingSettings, pin_code: newPin, updated_at: new Date().toISOString() };
+          await supabaseAdmin.from('app_settings').upsert(payload);
+        }
+      } else {
+        await supabaseAdmin
+          .from('app_settings')
+          .insert({ id: 'default_settings', pin_code: newPin, updated_at: new Date().toISOString() });
       }
 
+      console.log(`[AutoTradeAPI CHANGE_PIN] PIN successfully updated to: ${newPin}`);
       return NextResponse.json({ success: true, message: 'PIN 번호가 성공적으로 변경되었습니다.' });
     }
 

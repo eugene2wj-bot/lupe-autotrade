@@ -305,7 +305,7 @@ export default function AutoTradeSettingsPage() {
             <h2 className="text-xl font-bold text-gray-900 dark:text-gray-50">보안 PIN 번호 인증</h2>
             <p className="text-xs text-gray-500 dark:text-gray-400 leading-relaxed">
               자동매매 설정 및 API 인증키 조회를 위해<br />
-              <strong className="text-indigo-600 dark:text-indigo-400">보안 PIN 번호(기본값: 1234)</strong>를 입력하세요.
+              <strong className="text-indigo-600 dark:text-indigo-400">설정하신 보안 PIN 번호</strong>를 입력하세요.
             </p>
           </div>
 
