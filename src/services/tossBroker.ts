@@ -29,6 +29,69 @@ export interface TossOrderParams {
 const TOSS_BASE_URL = 'https://openapi.tossinvest.com';
 
 /**
+ * Vercel 백엔드 서버의 외향 Public IP (Outbound IP) 자동 조회
+ */
+export async function getOutboundServerIp(): Promise<string> {
+  try {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 3000);
+
+    const res = await fetch('https://api.ipify.org?format=json', {
+      signal: controller.signal,
+      cache: 'no-store',
+    });
+    clearTimeout(timeoutId);
+
+    if (res.ok) {
+      const data = await res.json();
+      if (data.ip) return String(data.ip).trim();
+    }
+  } catch {
+    try {
+      const res2 = await fetch('https://ifconfig.me/ip', { cache: 'no-store' });
+      if (res2.ok) {
+        const text = await res2.text();
+        if (text.trim()) return text.trim();
+      }
+    } catch {
+      // ignore
+    }
+  }
+  return '알 수 없음';
+}
+
+/**
+ * 토스 API 오류 파싱 및 IP 차단(access_denied) 시 Vercel 서버 IP 포함 상세 메시지 생성
+ */
+async function formatTossError(rawCode?: string, rawMsg?: string): Promise<{ errorCode: string; message: string }> {
+  const codeStr = String(rawCode || '').trim();
+  const msgStr = String(rawMsg || '').trim();
+  const combined = `${codeStr} ${msgStr}`.toLowerCase();
+
+  const isIpBlocked =
+    codeStr.includes('access_denied') ||
+    combined.includes('ip address not allowed') ||
+    combined.includes('not allowed ip') ||
+    combined.includes('ip_not_allowed') ||
+    combined.includes('ip차단') ||
+    combined.includes('unauthorized ip');
+
+  if (isIpBlocked) {
+    const serverIp = await getOutboundServerIp();
+    const formattedMsg = `🔴 [토스 API 오류] IP 차단됨! 토스증권 Open API 허용 IP 관리에 현재 Vercel 서버 IP (${serverIp})를 추가해 주세요.`;
+    return {
+      errorCode: codeStr || 'access_denied',
+      message: formattedMsg,
+    };
+  }
+
+  return {
+    errorCode: codeStr || 'TOSS_API_ERROR',
+    message: `${codeStr ? `${codeStr}: ` : ''}${msgStr || '토스 API 요청 실패'}`,
+  };
+}
+
+/**
  * 1. OAuth2 토큰 발급 API (POST /oauth2/token)
  */
 export async function getTossAccessToken(appKey: string, appSecret: string): Promise<{
@@ -63,9 +126,10 @@ export async function getTossAccessToken(appKey: string, appSecret: string): Pro
     } else {
       const errCode = data.error?.code || data.error || `HTTP_${res.status}`;
       const errMsg = data.error?.message || data.error_description || data.message || `토스 OAuth2 토큰 발급 실패 (${res.status})`;
+      const formatted = await formatTossError(errCode, errMsg);
       return {
         success: false,
-        error: `${errCode}: ${errMsg}`,
+        error: formatted.message,
         rawResponse: data,
       };
     }
@@ -99,9 +163,10 @@ export async function getTossAccountSeq(accessToken: string, targetAccountNo?: s
     if (!res.ok) {
       const errCode = data.error?.code || `HTTP_${res.status}`;
       const errMsg = data.error?.message || data.message || `계좌 목록 조회 실패 (${res.status})`;
+      const formatted = await formatTossError(errCode, errMsg);
       return {
         success: false,
-        error: `${errCode}: ${errMsg}`,
+        error: formatted.message,
         rawResponse: data,
       };
     }
@@ -215,11 +280,13 @@ export async function sendTossLocOrder(params: TossOrderParams): Promise<TossOrd
     } else {
       const errCode = resData.error?.code || resData.code || `HTTP_${res.status}`;
       const errMsg = resData.error?.message || resData.message || `토스 API 주문 실패 (${res.status})`;
+      const formatted = await formatTossError(errCode, errMsg);
+
       return {
         success: false,
-        errorCode: errCode,
+        errorCode: formatted.errorCode,
         orderId: `TOSS_FAIL_${params.ticker}_${Date.now()}`,
-        message: `${errCode}: ${errMsg}`,
+        message: formatted.message,
         rawResponse: resData,
       };
     }
