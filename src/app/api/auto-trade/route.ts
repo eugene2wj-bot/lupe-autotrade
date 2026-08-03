@@ -204,11 +204,33 @@ export async function POST(request: Request) {
         updated_at: new Date().toISOString(),
       };
 
-      const { data: newRow, error: upsertErr } = await supabaseAdmin
+      let { data: newRow, error: upsertErr } = await supabaseAdmin
         .from('cycles')
         .upsert(payload)
         .select('*')
         .single();
+
+      // cycles 테이블 스키마에 특정 컬럼(start_date 등)이 존재하지 않는 경우 폴백 재시도
+      if (upsertErr && (upsertErr.message.includes('schema cache') || upsertErr.code === 'PGRST204')) {
+        console.warn('[AutoTradeAPI] cycles upsert initial schema warning:', upsertErr.message);
+        const fallbackPayload: any = { ...payload };
+
+        if (upsertErr.message.includes('start_date')) delete fallbackPayload.start_date;
+        if (upsertErr.message.includes('compound_mode')) delete fallbackPayload.compound_mode;
+        if (upsertErr.message.includes('auto_trade_enabled')) delete fallbackPayload.auto_trade_enabled;
+        if (upsertErr.message.includes('split_count')) delete fallbackPayload.split_count;
+        if (upsertErr.message.includes('max_percent')) delete fallbackPayload.max_percent;
+        if (upsertErr.message.includes('commission_rate')) delete fallbackPayload.commission_rate;
+        if (upsertErr.message.includes('updated_at')) delete fallbackPayload.updated_at;
+
+        const retry = await supabaseAdmin
+          .from('cycles')
+          .upsert(fallbackPayload)
+          .select('*')
+          .single();
+        newRow = retry.data;
+        upsertErr = retry.error;
+      }
 
       if (upsertErr) {
         console.error('[AutoTradeAPI] cycles upsert error:', upsertErr);
