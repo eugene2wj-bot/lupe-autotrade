@@ -441,10 +441,16 @@ export async function syncPostMarketClose(targetCycleId?: string) {
   const nyTime = getNyseTime();
   const nyDateStr = `${nyTime.getFullYear()}-${String(nyTime.getMonth() + 1).padStart(2, '0')}-${String(nyTime.getDate()).padStart(2, '0')}`;
 
-  let { data: dbCycles } = await supabaseAdmin.from('cycles').select('*');
-  if (!dbCycles || dbCycles.length === 0) dbCycles = initialCyclesData as any[];
+  const { data: dbCycles, error: cycleErr } = await supabaseAdmin.from('cycles').select('*');
+  if (cycleErr) {
+    return {
+      success: false,
+      error: `DB Query Failed: ${cycleErr.message}`,
+      message: `🔴 DB 사이클 조회 실패: ${cycleErr.message}`,
+    };
+  }
 
-  let activeCycles = (dbCycles || []).filter((c: any) => !c.status || c.status === 'active');
+  let activeCycles = (dbCycles || []).filter((c: any) => (!c.status || c.status === 'active') && c.is_active !== false);
   if (targetCycleId) {
     activeCycles = activeCycles.filter((c: any) => c.id === targetCycleId);
   }
@@ -913,14 +919,17 @@ export async function POST(request: Request) {
         return NextResponse.json(result, { status: result.success ? 200 : 400 });
       }
 
-      // B) cycleId가 없는 경우 DB cycles 테이블에서 is_auto_trade_enabled = true 인 모든 활성 사이클 일괄 수행
-      let { data: dbCycles } = await supabaseAdmin.from('cycles').select('*');
-      if (!dbCycles || dbCycles.length === 0) {
-        dbCycles = initialCyclesData as any[];
+      // B) cycleId가 없는 경우 DB cycles 테이블에서 auto_trade_enabled = true 인 모든 활성 사이클 일괄 수행
+      const { data: dbCycles, error: cycleErr } = await supabaseAdmin.from('cycles').select('*');
+      if (cycleErr) {
+        return NextResponse.json(
+          { success: false, error: `DB Query Failed: ${cycleErr.message}`, message: `🔴 DB 사이클 조회 실패: ${cycleErr.message}` },
+          { status: 500 }
+        );
       }
 
       const activeCycles = (dbCycles || []).filter((c: any) => {
-        const isActive = !c.status || c.status === 'active';
+        const isActive = (!c.status || c.status === 'active') && c.is_active !== false;
         const isAutoEnabled = (c.is_auto_trade_enabled ?? c.auto_trade_enabled ?? c.autoTradeEnabled) !== false;
         return isActive && isAutoEnabled;
       });
@@ -928,7 +937,7 @@ export async function POST(request: Request) {
       if (activeCycles.length === 0) {
         return NextResponse.json({
           success: true,
-          message: '자동매매가 활성화된(is_auto_trade_enabled = true) 대상 사이클이 없습니다.',
+          message: 'DB에 자동매매가 활성화된(auto_trade_enabled = true) 대상 사이클이 없습니다.',
           totalCycles: 0,
           successCount: 0,
           totalOrders: 0,

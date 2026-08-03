@@ -103,8 +103,13 @@ export async function fetchCycles(): Promise<Cycle[]> {
       .select('*')
       .order('created_at', { ascending: false });
 
-    if (cycleErr || !dbCycles || dbCycles.length === 0) {
-      return initialCyclesData as Cycle[];
+    if (cycleErr) {
+      console.error('[DBService] Fetch cycles DB query failed:', cycleErr.message);
+      return [];
+    }
+
+    if (!dbCycles || dbCycles.length === 0) {
+      return [];
     }
 
     const { data: dbLogs } = await supabase
@@ -148,9 +153,9 @@ export async function fetchCycles(): Promise<Cycle[]> {
       autoTradeEnabled: row.auto_trade_enabled ?? true,
       logs: logsMap.get(row.id) || [],
     }));
-  } catch (err) {
-    console.warn('[DBService] Fetch cycles failed, fallback to local data:', err);
-    return initialCyclesData as Cycle[];
+  } catch (err: any) {
+    console.error('[DBService] Fetch cycles exception:', err?.message || err);
+    return [];
   }
 }
 
