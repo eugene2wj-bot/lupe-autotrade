@@ -24,7 +24,7 @@ export async function POST(request: Request) {
     const body = await request.json();
     const { action, cycleId, cycleName, cycle: clientCycle, forceTest } = body;
 
-    // ── 0. PIN 번호 검증 및 변경 액션 (`VERIFY_PIN`, `CHANGE_PIN`) ───────────
+    // ── 0. PIN 번호 검증 및 변경 액션 (`VERIFY_PIN`, `CHANGE_PIN`, `GET_SETTINGS`) ───────────
     if (action === 'VERIFY_PIN') {
       const inputPin = body.pinCode || body.pin_code || '';
       const { data: existingSettings } = await supabaseAdmin
@@ -42,6 +42,38 @@ export async function POST(request: Request) {
           { status: 401 }
         );
       }
+    }
+
+    if (action === 'GET_SETTINGS' || action === 'get-settings') {
+      const { data: existingSettings } = await supabaseAdmin
+        .from('app_settings')
+        .select('*')
+        .limit(1)
+        .maybeSingle();
+
+      const formattedSettings = {
+        id: existingSettings?.id,
+        is_global_auto_trade: existingSettings?.is_global_auto_trade ?? false,
+        toss_app_key: existingSettings?.toss_app_key ?? '',
+        toss_app_secret: existingSettings?.toss_app_secret ?? '',
+        toss_account_no: existingSettings?.toss_account_no ?? '',
+        telegram_bot_token: existingSettings?.telegram_bot_token ?? '',
+        telegram_chat_id: existingSettings?.telegram_chat_id ?? '',
+        auto_trade_time: existingSettings?.auto_trade_time ?? '22:30',
+        pin_code: existingSettings?.pin_code ?? '1234',
+
+        tossAppKey: existingSettings?.toss_app_key ?? '',
+        tossAppSecret: existingSettings?.toss_app_secret ?? '',
+        tossAccountNo: existingSettings?.toss_account_no ?? '',
+        telegramBotToken: existingSettings?.telegram_bot_token ?? '',
+        telegramChatId: existingSettings?.telegram_chat_id ?? '',
+        autoTradeTime: existingSettings?.auto_trade_time ?? '22:30',
+      };
+
+      return NextResponse.json({
+        success: true,
+        settings: formattedSettings,
+      });
     }
 
     if (action === 'CHANGE_PIN') {
@@ -80,9 +112,18 @@ export async function POST(request: Request) {
         .upsert(payload);
 
       if (updateErr && updateErr.message.includes('pin_code')) {
+        console.warn('[AutoTradeAPI] pin_code column missing in DB. Retrying without pin_code field...');
         const fallback = { ...payload };
         delete fallback.pin_code;
         await supabaseAdmin.from('app_settings').upsert(fallback);
+        return NextResponse.json(
+          {
+            success: false,
+            error: `DB 저장 실패: ${updateErr.message}`,
+            message: `🔴 Supabase DB app_settings 테이블에 pin_code 컬럼이 없습니다. (ALTER TABLE app_settings ADD COLUMN pin_code TEXT DEFAULT '1234'; 실행 필요)`,
+          },
+          { status: 500 }
+        );
       }
 
       return NextResponse.json({ success: true, message: 'PIN 번호가 성공적으로 변경되었습니다.' });

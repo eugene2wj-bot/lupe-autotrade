@@ -46,17 +46,32 @@ export default function AutoTradeSettingsPage() {
   const [showTelegramBotToken, setShowTelegramBotToken] = useState(false);
   const [showTelegramChatId, setShowTelegramChatId] = useState(false);
 
-  // 보안 인증(PIN) 성공 후 DB 데이터 로드
+  // 보안 인증(PIN) 성공 후 DB 데이터 자동 불러오기 (GET_SETTINGS 서버 수집)
   useEffect(() => {
     if (isUnlocked) {
       async function loadData() {
         setIsLoading(true);
         try {
-          const fetchedSettings = await getAppSettings();
-          setSettings(fetchedSettings);
+          const res = await fetch('/api/auto-trade', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ action: 'GET_SETTINGS' }),
+          });
+
+          const data = await res.json();
+          if (res.ok && data.success && data.settings) {
+            setSettings(data.settings);
+          } else {
+            const fetchedSettings = await getAppSettings();
+            setSettings(fetchedSettings);
+          }
+
           if (cycles.length > 0) {
             setSelectedCycleId(cycles[0].id);
           }
+        } catch {
+          const fetchedSettings = await getAppSettings();
+          setSettings(fetchedSettings);
         } finally {
           setIsLoading(false);
         }
