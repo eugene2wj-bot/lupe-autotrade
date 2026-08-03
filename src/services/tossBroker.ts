@@ -5,6 +5,7 @@
 // -------------------------------------------------------
 
 import type { Cycle, Order, TradeLog } from '@/types/cycle';
+import { ProxyAgent, fetch as undiciFetch } from 'undici';
 
 export interface TossOrderResult {
   success: boolean;
@@ -29,26 +30,54 @@ export interface TossOrderParams {
 const TOSS_BASE_URL = 'https://openapi.tossinvest.com';
 
 /**
+ * Fixie Proxy (FIXIE_URL) 고정 IP 지원 HTTP Fetch 래퍼
+ */
+async function tossFetch(url: string, options: RequestInit = {}): Promise<Response> {
+  const fixieUrl = (
+    process.env.FIXIE_URL ||
+    process.env.FIXIE_URL_PROXY ||
+    process.env.FIXIE_PROXY ||
+    ''
+  ).trim();
+
+  if (fixieUrl) {
+    console.log('🌐 [Fixie Proxy] 고정 IP 프록시를 통해 토스 API 호출 중...');
+    try {
+      const dispatcher = new ProxyAgent(fixieUrl);
+      const res = await undiciFetch(url, {
+        ...(options as any),
+        dispatcher,
+      });
+      return res as unknown as Response;
+    } catch (err: any) {
+      console.warn('[Fixie Proxy] 프록시 연결 오류, 기본 fetch로 fallback 진행:', err?.message || err);
+    }
+  }
+
+  return fetch(url, options);
+}
+
+/**
  * Vercel 백엔드 서버의 외향 Public IP (Outbound IP) 자동 조회
  */
 export async function getOutboundServerIp(): Promise<string> {
   try {
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 3000);
+    const timeoutId = setTimeout(() => controller.abort(), 4000);
 
-    const res = await fetch('https://api.ipify.org?format=json', {
+    const res = await tossFetch('https://api.ipify.org?format=json', {
       signal: controller.signal,
       cache: 'no-store',
     });
     clearTimeout(timeoutId);
 
     if (res.ok) {
-      const data = await res.json();
+      const data: any = await res.json();
       if (data.ip) return String(data.ip).trim();
     }
   } catch {
     try {
-      const res2 = await fetch('https://ifconfig.me/ip', { cache: 'no-store' });
+      const res2 = await tossFetch('https://ifconfig.me/ip', { cache: 'no-store' });
       if (res2.ok) {
         const text = await res2.text();
         if (text.trim()) return text.trim();
@@ -78,7 +107,7 @@ async function formatTossError(rawCode?: string, rawMsg?: string): Promise<{ err
 
   if (isIpBlocked) {
     const serverIp = await getOutboundServerIp();
-    const formattedMsg = `🔴 [토스 API 오류] IP 차단됨! 토스증권 Open API 허용 IP 관리에 현재 Vercel 서버 IP (${serverIp})를 추가해 주세요.`;
+    const formattedMsg = `🔴 [토스 API 오류] IP 차단됨! 토스증권 Open API 허용 IP 관리에 현재 Vercel 서버 IP (${serverIp})를 추가해 주세요. (원인: ${msgStr || codeStr})`;
     return {
       errorCode: codeStr || 'access_denied',
       message: formattedMsg,
@@ -107,7 +136,7 @@ export async function getTossAccessToken(appKey: string, appSecret: string): Pro
     params.append('client_id', appKey.trim());
     params.append('client_secret', appSecret.trim());
 
-    const res = await fetch(url, {
+    const res = await tossFetch(url, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/x-www-form-urlencoded',
@@ -115,7 +144,7 @@ export async function getTossAccessToken(appKey: string, appSecret: string): Pro
       body: params.toString(),
     });
 
-    const data = await res.json().catch(() => ({}));
+    const data: any = await res.json().catch(() => ({}));
     if (res.ok && (data.access_token || data.result?.access_token)) {
       const token = data.access_token || data.result?.access_token;
       return {
@@ -152,14 +181,14 @@ export async function getTossAccountSeq(accessToken: string, targetAccountNo?: s
 }> {
   try {
     const url = `${TOSS_BASE_URL}/api/v1/accounts`;
-    const res = await fetch(url, {
+    const res = await tossFetch(url, {
       method: 'GET',
       headers: {
         'Authorization': `Bearer ${accessToken}`,
       },
     });
 
-    const data = await res.json().catch(() => ({}));
+    const data: any = await res.json().catch(() => ({}));
     if (!res.ok) {
       const errCode = data.error?.code || `HTTP_${res.status}`;
       const errMsg = data.error?.message || data.message || `계좌 목록 조회 실패 (${res.status})`;
@@ -256,7 +285,7 @@ export async function sendTossLocOrder(params: TossOrderParams): Promise<TossOrd
       clientOrderId: clientOrderId,
     };
 
-    const res = await fetch(url, {
+    const res = await tossFetch(url, {
       method: 'POST',
       headers: {
         'Authorization': `Bearer ${accessToken}`,
@@ -266,7 +295,7 @@ export async function sendTossLocOrder(params: TossOrderParams): Promise<TossOrd
       body: JSON.stringify(bodyPayload),
     });
 
-    const resData = await res.json().catch(() => ({}));
+    const resData: any = await res.json().catch(() => ({}));
 
     // 4) 결과 검증: 200 OK & { result: { orderId: "..." } }
     if (res.ok && (resData.result?.orderId || resData.orderId)) {
