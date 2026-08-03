@@ -115,18 +115,35 @@ async function executeOrdersForCycle(
     .eq('cycle_id', cycle.id)
     .gte('created_at', todayStartIso);
 
-  const hasActiveOrderToday = (existingOrders || []).some((o: any) =>
+  const submittedOrderToday = (existingOrders || []).find((o: any) => o.status === 'submitted');
+  const activeOrderToday = (existingOrders || []).find((o: any) =>
     ['pending', 'submitted', 'simulated', 'filled'].includes(o.status)
   );
 
-  if (hasActiveOrderToday && !forceTest) {
+  // 1) 당일 이미 토스 API로 제출 성공한 주문(status: 'submitted')이 존재하는 경우: forceTest 여부와 상관없이 무조건 차단!
+  if (submittedOrderToday) {
     return {
       cycleId: cycle.id,
       cycleName: cycle.name,
       success: false,
       isRealToss,
+      isDuplicate: true,
+      error: '이미 제출 완료된 주문 존재 (중복 방지)',
+      message: `🛑 [중복 주문 차단] 오늘(${nyDateStr} ET) [${cycle.name}] 사이클은 이미 토스증권 API로 주문이 제출 완료되었습니다. (주문 ID: ${submittedOrderToday.order_id || submittedOrderToday.id})`,
+      count: 0,
+    };
+  }
+
+  // 2) 가상주문/대기 주문이 존재하고 forceTest가 false인 경우 차단
+  if (activeOrderToday && !forceTest) {
+    return {
+      cycleId: cycle.id,
+      cycleName: cycle.name,
+      success: false,
+      isRealToss,
+      isDuplicate: true,
       error: '중복 주문 방지 Lock',
-      message: `🛑 [중복 주문 방지 Lock] 오늘(${nyDateStr} ET) [${cycle.name}] 사이클에 이미 제출된 주문이 존재합니다.`,
+      message: `🛑 [중복 주문 방지 Lock] 오늘(${nyDateStr} ET) [${cycle.name}] 사이클에 이미 등록된 주문이 존재합니다.`,
       count: 0,
     };
   }
@@ -186,11 +203,24 @@ async function executeOrdersForCycle(
     const rawPrice = typeof o.price === 'number' ? o.price : 0;
     const rawQty = typeof o.qty === 'number' ? o.qty : 0;
 
+    if (rawPrice <= 0 || rawQty <= 0) {
+      console.warn(`[AutoTradeAPI] 스킵 (유효하지 않은 가격/수량): ${o.label} (Price: ${rawPrice}, Qty: ${rawQty})`);
+      continue;
+    }
+
     let orderStatus = 'simulated';
     let tossOrderRef = `TOSS_SIMULATED_${cycle.ticker}_${Date.now()}`;
     let tossResponseData: any = null;
 
     if (isRealToss) {
+      console.log(`==================================================`);
+      console.log(`🟢 [AutoTradeAPI 1:1 파라미터 동기화 검증]`);
+      console.log(` 사이클: ${cycle.name} (${cycle.ticker})`);
+      console.log(` 가이드 레이블: ${o.label}`);
+      console.log(` 가이드 계산 가격: $${(rawPrice / 100).toFixed(2)} (${rawPrice} 센트)`);
+      console.log(` 가이드 계산 수량: ${rawQty}주`);
+      console.log(`==================================================`);
+
       const tossRes = await sendTossLocOrder({
         appKey: tossAppKey,
         appSecret: tossAppSecret,
@@ -665,10 +695,13 @@ export async function POST(request: Request) {
           const { data } = await supabaseAdmin.from('cycles').select('*').eq('id', cycleId).maybeSingle();
           cycleRow = data;
         }
+        if (!cycleRow && cycleId) {
+          cycleRow = (initialCyclesData as any[]).find((c) => c.id === cycleId);
+        }
         if (!cycleRow && (cycleName || clientCycle?.name)) {
           const targetName = cycleName || clientCycle?.name;
           const { data } = await supabaseAdmin.from('cycles').select('*').eq('name', targetName).maybeSingle();
-          cycleRow = data;
+          cycleRow = data || (initialCyclesData as any[]).find((c) => c.name === targetName);
         }
 
         const targetCycleId = cycleRow?.id || clientCycle?.id || cycleId;

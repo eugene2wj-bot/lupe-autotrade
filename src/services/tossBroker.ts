@@ -280,10 +280,19 @@ export async function sendTossLocOrder(params: TossOrderParams): Promise<TossOrd
     }
     const accountSeq = String(accountRes.accountSeq);
 
-    // 3) 미국 주식 LOC 매수 주문 전송
+    // 3) 미국 주식 LOC 매수/매도 주문 전송
+    if (params.price <= 0 || params.qty <= 0) {
+      console.warn(`[tossBroker] 유효하지 않은 주문 파라미터 (Price: ${params.price}, Qty: ${params.qty})`);
+      return {
+        success: false,
+        errorCode: 'INVALID_ORDER_PARAMS',
+        message: `유효하지 않은 주문 파라미터입니다. (Price: $${(params.price / 100).toFixed(2)}, Qty: ${params.qty}주)`,
+      };
+    }
+
     const url = `${TOSS_BASE_URL}/api/v1/orders`;
-    const dollarsPrice = params.price > 0 ? (params.price / 100).toFixed(2) : '0.00';
-    const clientOrderId = params.clientOrderId || `LUPE_${params.ticker}_${Date.now()}`;
+    const dollarsPrice = (params.price / 100).toFixed(2);
+    const clientOrderId = params.clientOrderId || `LUPE_${params.ticker.toUpperCase()}_${Date.now()}_${Math.floor(Math.random() * 1000)}`;
 
     const bodyPayload = {
       symbol: params.ticker.toUpperCase(),
@@ -294,6 +303,14 @@ export async function sendTossLocOrder(params: TossOrderParams): Promise<TossOrd
       price: dollarsPrice,
       clientOrderId: clientOrderId,
     };
+
+    console.log(`==================================================`);
+    console.log(`🟢 [토스 API 전송 Payload 1:1 동기화 검증]`);
+    console.log(` Symbol: ${bodyPayload.symbol}, Side: ${bodyPayload.side}`);
+    console.log(` Calculated Price: $${dollarsPrice} (${params.price} 센트)`);
+    console.log(` Calculated Quantity: ${params.qty}주`);
+    console.log(` Toss Request Body:`, JSON.stringify(bodyPayload, null, 2));
+    console.log(`==================================================`);
 
     const res = await tossFetch(url, {
       method: 'POST',

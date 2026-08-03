@@ -390,27 +390,32 @@ function AutoTradeSettingsInner() {
 
   // 🚀 [장전 자동주문 즉시 실행] 수동 실행 버튼
   const handleExecuteDailyTrade = async () => {
-    const isConfirmed = confirm('오늘의 장전 자동주문(LOC)을 즉시 실행하시겠습니까?');
+    const targetCycle = cycles.find((c) => c.id === selectedCycleId) || cycles[0];
+    const cycleNameStr = targetCycle ? `[${targetCycle.name}] ` : '';
+
+    const isConfirmed = confirm(`오늘의 ${cycleNameStr}장전 자동주문(LOC)을 즉시 실행하시겠습니까?`);
     if (!isConfirmed) return;
 
-    addLog('🚀 [장전 자동주문 즉시 실행] 백엔드로 EXECUTE_DAILY_TRADE 요청 전송 중...');
+    addLog(`🚀 [장전 자동주문 즉시 실행] ${cycleNameStr}백엔드로 EXECUTE_DAILY_TRADE 요청 전송 중...`);
     try {
       const res = await fetch('/api/auto-trade', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           action: 'EXECUTE_DAILY_TRADE',
+          cycleId: targetCycle?.id || selectedCycleId,
+          cycleName: targetCycle?.name,
           forceTest: true,
         }),
       });
 
-      const data = await res.json();
+      const data = await res.json().catch(() => ({}));
       if (res.ok && data.success) {
         const detailMsg = data.message || '장전 자동주문(LOC) 실행이 성공적으로 완료되었습니다.';
         addLog(`✅ [장전 자동주문 즉시 실행 성공] ${detailMsg}`);
 
         if (data.totalOrders !== undefined) {
-          addLog(`📊 처리결과: ${data.totalCycles || 0}개 사이클 중 ${data.successCount || 0}개 성공 (총 ${data.totalOrders}건 주문 생성)`);
+          addLog(`📊 처리결과: ${data.totalCycles || 1}개 사이클 중 ${data.successCount || 1}개 성공 (총 ${data.totalOrders}건 주문 생성)`);
         }
 
         if (Array.isArray(data.results)) {
@@ -419,7 +424,7 @@ function AutoTradeSettingsInner() {
           });
         }
 
-        alert(`✅ 오늘의 장전 자동주문(LOC) 실행 결과:\n\n${detailMsg}`);
+        alert(`✅ ${cycleNameStr}장전 자동주문(LOC) 실행 결과:\n\n${detailMsg}`);
       } else {
         const errorMsg = data.message || data.error || '장전 자동주문 실행 중 오류가 발생했습니다.';
         addLog(`🔴 [장전 자동주문 즉시 실행 실패] ${errorMsg}`);
@@ -779,20 +784,12 @@ function AutoTradeSettingsInner() {
         </h2>
 
         <div className="flex flex-wrap items-center gap-3">
-          <button
-            type="button"
-            onClick={handleExecuteDailyTrade}
-            className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 active:scale-95 text-white font-bold text-xs rounded-xl shadow-xs transition-all flex items-center gap-1.5"
-          >
-            <span>🚀</span> 장전 자동주문 즉시 실행
-          </button>
-
-          <div className="flex items-center gap-2">
-            <span className="text-xs font-semibold text-gray-500 dark:text-gray-400">테스트 대상:</span>
+          <div className="flex items-center gap-2 bg-gray-50 dark:bg-gray-800/80 px-3 py-1.5 rounded-xl border border-gray-200 dark:border-gray-700">
+            <span className="text-xs font-bold text-gray-700 dark:text-gray-300">🎯 실행/테스트 대상:</span>
             <select
               value={selectedCycleId || ''}
               onChange={(e) => setSelectedCycleId(e.target.value)}
-              className="px-3 py-1.5 text-xs font-bold bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl outline-none"
+              className="px-2.5 py-1 text-xs font-bold bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-lg outline-none focus:border-indigo-500"
             >
               {cycles.map((c) => (
                 <option key={c.id} value={c.id}>
@@ -804,10 +801,18 @@ function AutoTradeSettingsInner() {
 
           <button
             type="button"
+            onClick={handleExecuteDailyTrade}
+            className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 active:scale-95 text-white font-bold text-xs rounded-xl shadow-xs transition-all flex items-center gap-1.5"
+          >
+            <span>🚀</span> [{cycles.find((c) => c.id === selectedCycleId)?.name || '선택 사이클'}] 장전 주문 즉시 실행
+          </button>
+
+          <button
+            type="button"
             onClick={handleTestOrderSubmit}
             className="px-4 py-2 bg-purple-600 hover:bg-purple-700 active:scale-95 text-white font-bold text-xs rounded-xl shadow-xs transition-all"
           >
-            🧪 토스 API 가상 주문 테스트
+            🧪 가상 주문 테스트
           </button>
 
           <button
