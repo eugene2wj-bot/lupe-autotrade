@@ -870,7 +870,7 @@ function AutoTradeSettingsInner() {
             onClick={handleSyncClosePrice}
             className="px-4 py-2 bg-blue-600 hover:bg-blue-700 active:scale-95 text-white font-bold text-xs rounded-xl shadow-xs transition-all"
           >
-            📊 장 마감 종가 수집 & 가이드 산출
+            🔄 전일 종가 수집 및 가이드 즉시 갱신
           </button>
 
           <button

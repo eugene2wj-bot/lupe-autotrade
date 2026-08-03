@@ -511,16 +511,27 @@ export async function syncPostMarketClose(targetCycleId?: string) {
       holding_qty: stats.holdingQty,
       current_t: stats.currentT,
       phase: stats.phase,
-      realized_profit: stats.realizedProfit,
+      realized_profit: stats.realizedProfit ?? 0,
       created_at: new Date().toISOString(),
     };
 
-    const { error: dailyRecordErr } = await supabaseAdmin
+    console.log(`[daily_records Upsert Check] Cycle: ${cycle.name}, Date: ${nyDateStr}, ClosePrice: $${closePriceDollars} (${closePriceCents} cents), Change%: ${dailyRecordPayload.change_percent}%, AvgPrice: $${(stats.avgPrice / 100).toFixed(2)}, Qty: ${stats.holdingQty}, T: ${stats.currentT}, Phase: ${stats.phase}`);
+
+    let { error: dailyRecordErr } = await supabaseAdmin
       .from('daily_records')
       .upsert(dailyRecordPayload, { onConflict: 'cycle_id,date' });
 
+    if (dailyRecordErr && (dailyRecordErr.message.includes('onConflict') || dailyRecordErr.message.includes('constraint'))) {
+      const retry = await supabaseAdmin
+        .from('daily_records')
+        .upsert(dailyRecordPayload);
+      dailyRecordErr = retry.error;
+    }
+
     if (dailyRecordErr) {
       console.warn(`[syncPostMarketClose] daily_records table upsert warning (${cycle.name}):`, dailyRecordErr.message);
+    } else {
+      console.log(`✅ [syncPostMarketClose] daily_records saved successfully for ${cycle.name} (${nyDateStr})`);
     }
 
     // 5) 오늘 밤 전송할 매매 가이드 자동 산출
