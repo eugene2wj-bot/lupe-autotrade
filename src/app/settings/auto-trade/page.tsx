@@ -93,6 +93,7 @@ function AutoTradeSettingsInner() {
     openNewCycleModal,
     openEditCycleModal,
     closeModal,
+    loadFromDb,
   } = useCycleStore();
 
   const [settings, setSettings] = useState<AppSettings>({ ...DEFAULT_SETTINGS });
@@ -1058,6 +1059,41 @@ function AutoTradeSettingsInner() {
             className="px-4 py-2 bg-blue-600 hover:bg-blue-700 active:scale-95 text-white font-bold text-xs rounded-xl shadow-xs transition-all"
           >
             🔄 전일 종가 수집 및 가이드 즉시 갱신
+          </button>
+
+          <button
+            type="button"
+            onClick={async () => {
+              if (confirm('백업 데이터(TQQQ 1차 52건, SOXL 1차 53건 매매 기록)를 Supabase DB로 복원하고 현재 포지션(T회차, 평단, 보유량)을 재계산하시겠습니까?')) {
+                addLog('🔄 Supabase DB 백업 데이터 100% 복원 및 포지션 재계산 시작...');
+                try {
+                  const res = await fetch('/api/auto-trade', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ action: 'RESTORE_INITIAL_CYCLES' }),
+                  });
+                  const data = await res.json();
+                  if (data.success) {
+                    addLog(data.message);
+                    if (data.results) {
+                      data.results.forEach((r: any) => {
+                        addLog(`📌 [${r.name}] ${r.logsCount}건 매매기록 이식 ➔ T=${r.stats.currentT} / 평단=$${r.stats.avgPriceDollars} / 보유=${r.stats.holdingQty}주 (${r.stats.phase})`);
+                      });
+                    }
+                    await loadFromDb();
+                    alert(`✅ TQQQ 1차 백업 데이터 DB 이식 및 포지션 자동 재계산이 완료되었습니다!`);
+                  } else {
+                    addLog(`🔴 복원 실패: ${data.error || data.message}`);
+                    alert(`🔴 복원 실패: ${data.error || data.message}`);
+                  }
+                } catch (err: any) {
+                  addLog(`🔴 복원 요청 에러: ${err?.message || err}`);
+                }
+              }
+            }}
+            className="px-4 py-2 bg-amber-600 hover:bg-amber-700 active:scale-95 text-white font-bold text-xs rounded-xl shadow-xs transition-all"
+          >
+            🔄 TQQQ 1차 / SOXL 1차 백업 데이터 DB 복원 & 포지션 재계산
           </button>
 
           <button

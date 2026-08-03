@@ -6,6 +6,9 @@ import { supabase } from '@/lib/supabase';
 import type { AppSettings, AutoOrder, Cycle, DailyRecord, TradeLog } from '@/types/cycle';
 import initialCyclesData from '@/data/cycles.json';
 
+import { calcCycleStats } from '@/utils/calculator';
+import { getQuotesForCycle } from '@/store/cycleStore';
+
 const DEFAULT_SETTINGS: AppSettings = {
   is_global_auto_trade: false,
   toss_app_key: '',
@@ -17,65 +20,137 @@ const DEFAULT_SETTINGS: AppSettings = {
 };
 
 /**
- * DB 데이터 초기 이식 (Seeding)
- * 테이블에 데이터가 없는 경우 src/data/cycles.json 데이터를 Supabase로 이식합니다.
+ * TQQQ 1차 및 SOXL 1차 누적 매매 데이터 (my_cycles.json / cycles.json) Supabase DB 복원/이식
  */
-export async function seedInitialDataIfEmpty(): Promise<void> {
+export async function restoreInitialDataToDb(): Promise<{
+  success: boolean;
+  cyclesCount: number;
+  logsCount: number;
+  message: string;
+  results?: any[];
+}> {
   try {
-    // 1. cycles 테이블 존재/데이터 여부 확인
-    const { data: existingCycles, error: checkErr } = await supabase
-      .from('cycles')
-      .select('id')
-      .limit(1);
+    const cyclesData = initialCyclesData as Cycle[];
+    let totalLogsCount = 0;
+    const restoredResults: any[] = [];
 
-    if (!checkErr && existingCycles && existingCycles.length === 0) {
-      console.log('[DB Seeding] Initializing DB with initial data...');
-      const cyclesToInsert = (initialCyclesData as Cycle[]).map((c) => ({
+    for (const c of cyclesData) {
+      const cyclePayload = {
         id: c.id,
-        name: c.name,
-        ticker: c.ticker,
+        name: (c.name || '').trim(),
+        ticker: (c.ticker || '').toUpperCase(),
         version: c.version,
         split_count: c.splitCount,
         max_percent: c.maxPercent,
         principal: c.principal,
         compound_mode: c.compoundMode,
-        status: c.status,
+        status: c.status || 'active',
         start_date: c.startDate,
-        commission_rate: c.commissionRate,
+        commission_rate: c.commissionRate ?? 0.1,
         auto_trade_enabled: true,
-      }));
+        is_active: (c.status || 'active') === 'active',
+        updated_at: new Date().toISOString(),
+      };
 
-      const { error: insertCycleErr } = await supabase.from('cycles').insert(cyclesToInsert);
-      if (insertCycleErr) {
-        console.warn('[DB Seeding] Failed to insert cycles:', insertCycleErr.message);
+      const { error: cycleErr } = await supabase.from('cycles').upsert(cyclePayload);
+      if (cycleErr) {
+        console.error(`[DBRestore] Failed to upsert cycle ${c.name}:`, cycleErr.message);
       }
 
-      // trade_logs 수집 및 이식
-      const allLogs: any[] = [];
-      (initialCyclesData as Cycle[]).forEach((c) => {
-        c.logs.forEach((l) => {
-          allLogs.push({
-            id: l.id,
-            cycle_id: c.id,
-            date: l.date,
-            type: l.type,
-            order_type: l.orderType,
-            price: l.price,
-            qty: l.qty,
-            memo: l.memo,
-            profit: l.profit,
-            commission_rate: l.commissionRate,
-            batch_id: l.batchId,
-          });
-        });
-      });
+      if (c.logs && c.logs.length > 0) {
+        const logsPayload = c.logs.map((l) => ({
+          id: l.id,
+          cycle_id: c.id,
+          date: l.date,
+          type: l.type,
+          order_type: l.orderType,
+          price: l.price,
+          qty: l.qty,
+          memo: l.memo ?? null,
+          profit: l.profit ?? null,
+          commission_rate: l.commissionRate ?? c.commissionRate ?? 0.1,
+          batch_id: l.batchId || l.id,
+        }));
 
-      if (allLogs.length > 0) {
-        const { error: insertLogsErr } = await supabase.from('trade_logs').insert(allLogs);
-        if (insertLogsErr) {
-          console.warn('[DB Seeding] Failed to insert trade_logs:', insertLogsErr.message);
+        const { error: logsErr } = await supabase.from('trade_logs').upsert(logsPayload);
+        if (logsErr) {
+          console.error(`[DBRestore] Failed to upsert trade_logs for ${c.name}:`, logsErr.message);
+        } else {
+          totalLogsCount += logsPayload.length;
         }
       }
+
+      // 📊 포지션 및 통계 (T회차, 평단가, 보유수량) 자동 재계산
+      const quotes = getQuotesForCycle(c);
+      const stats = calcCycleStats(c, quotes);
+
+      // daily_records 업데이트
+      const latestDate = c.logs && c.logs.length > 0
+        ? [...c.logs].sort((a, b) => a.date.localeCompare(b.date))[c.logs.length - 1].date
+        : c.startDate;
+
+      const dailyPayload = {
+        cycle_id: c.id,
+        ticker: (c.ticker || '').toUpperCase(),
+        date: latestDate,
+        close_price: Math.round(stats.avgPrice),
+        change_percent: 0,
+        avg_price: Math.round(stats.avgPrice),
+        holding_qty: stats.holdingQty,
+        current_t: stats.currentT,
+        phase: stats.phase,
+        realized_profit: stats.realizedProfit ?? 0,
+        created_at: new Date().toISOString(),
+      };
+
+      await supabase.from('daily_records').upsert(dailyPayload, { onConflict: 'cycle_id,date' });
+
+      restoredResults.push({
+        id: c.id,
+        name: c.name,
+        ticker: c.ticker,
+        logsCount: c.logs.length,
+        stats: {
+          currentT: stats.currentT,
+          avgPriceDollars: (stats.avgPrice / 100).toFixed(2),
+          holdingQty: stats.holdingQty,
+          phase: stats.phase,
+        },
+      });
+    }
+
+    return {
+      success: true,
+      cyclesCount: cyclesData.length,
+      logsCount: totalLogsCount,
+      message: `✅ Supabase DB에 TQQQ 1차 및 SOXL 1차 데이터(${totalLogsCount}건 매매기록) 복원 및 포지션 재계산 완료!`,
+      results: restoredResults,
+    };
+  } catch (err: any) {
+    return {
+      success: false,
+      cyclesCount: 0,
+      logsCount: 0,
+      message: `🔴 DB 복원 예외 발생: ${err?.message || err}`,
+    };
+  }
+}
+
+/**
+ * DB 데이터 초기 이식 (Seeding)
+ */
+export async function seedInitialDataIfEmpty(): Promise<void> {
+  try {
+    const { data: existingCycles, error: checkErr } = await supabase
+      .from('cycles')
+      .select('id');
+
+    const existingIds = new Set((existingCycles || []).map((c) => c.id));
+    const missing = (initialCyclesData as Cycle[]).filter((c) => !existingIds.has(c.id));
+
+    if (!checkErr && missing.length > 0) {
+      console.log(`[DB Seeding] Auto-restoring ${missing.length} missing initial cycles into Supabase DB...`);
+      await restoreInitialDataToDb();
     }
 
     // 2. app_settings 데이터 여부 확인

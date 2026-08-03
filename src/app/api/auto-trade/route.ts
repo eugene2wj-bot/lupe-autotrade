@@ -21,6 +21,7 @@ import {
 } from '@/utils/usMarketCalendar';
 import type { Cycle, Order, TradeLog } from '@/types/cycle';
 import initialCyclesData from '@/data/cycles.json';
+import { restoreInitialDataToDb } from '@/services/dbService';
 
 /**
  * 단일 사이클 자동 가상/실전 주문 처리 헬퍼 함수
@@ -1114,7 +1115,13 @@ export async function POST(request: Request) {
       });
     }
 
-    // ── 6. 장 마감 종가 수집 & 매매 가이드 자동 산출 액션 ─────────────────
+    // ── 6. 백업 데이터 복원 액션 (`RESTORE_INITIAL_CYCLES`) ─────────────────
+    if (['RESTORE_INITIAL_CYCLES', 'restore-db', 'seed-db'].includes(action)) {
+      const res = await restoreInitialDataToDb();
+      return NextResponse.json(res);
+    }
+
+    // ── 7. 장 마감 종가 수집 & 매매 가이드 자동 산출 액션 ─────────────────
     const isCloseSyncAction = ['POST_MARKET_CLOSE_SYNC', 'SYNC_CLOSE_PRICE', 'cron-close-price', 'sync-close'].includes(action);
     if (isCloseSyncAction) {
       const res = await syncPostMarketClose(cycleId || undefined);
