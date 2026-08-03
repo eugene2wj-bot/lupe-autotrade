@@ -1,19 +1,25 @@
 // -------------------------------------------------------
 // 텔레그램 알림 서비스 (Telegram Bot Integration)
-// 🔒 보안 가드레일: Chat ID 100% 본인 검증 래퍼 적용
+// 🔒 보안 가드레일 & 상세 에러 진단 반환 지원
 // -------------------------------------------------------
 
 import { getAppSettings } from '@/services/dbService';
 import type { Order, TradeLog } from '@/types/cycle';
 
+export interface TelegramSendResult {
+  success: boolean;
+  statusCode?: number;
+  error?: string;
+}
+
 /**
- * 텔레그램 메세지 전송 공통 함수 (보안 가드레일 검증)
+ * 텔레그램 메세지 전송 공통 함수 (상세 에러 진단 반환)
  */
-export async function sendTelegramMessage(
+export async function sendTelegramMessageDetailed(
   message: string,
   botToken?: string,
   chatId?: string
-): Promise<boolean> {
+): Promise<TelegramSendResult> {
   try {
     const settings = await getAppSettings();
 
@@ -23,16 +29,18 @@ export async function sendTelegramMessage(
     const token = botToken || dbToken;
     const targetChatId = chatId || authorizedChatId;
 
-    if (!token || !targetChatId) {
-      console.log('[TelegramService] Telegram botToken or authorized chatId is missing. Skip sending.');
-      return false;
+    if (!token) {
+      return { success: false, error: '텔레그램 Bot Token이 설정되지 않았습니다 (app_settings DB 확인 필요).' };
+    }
+    if (!targetChatId) {
+      return { success: false, error: '텔레그램 Chat ID가 설정되지 않았습니다 (app_settings DB 확인 필요).' };
     }
 
-    // 🔒 보안 가드레일 2: 텔레그램 Chat ID 100% 본인 검증
-    // DB 또는 환경변수에 등록된 authorizedChatId와 전달받은 targetChatId가 불일치할 경우 차단
+    // 🔒 보안 가드레일: 텔레그램 Chat ID 100% 본인 검증
     if (authorizedChatId && targetChatId !== authorizedChatId) {
-      console.warn(`[Security Alert] Unauthorized Telegram Chat ID attempt: ${targetChatId} (Authorized: ${authorizedChatId})`);
-      return false;
+      const err = `[보안 차단] 미인가 Telegram Chat ID 시도: ${targetChatId} (등록된 허용 ID: ${authorizedChatId})`;
+      console.warn(err);
+      return { success: false, error: err };
     }
 
     const url = `https://api.telegram.org/bot${token}/sendMessage`;
@@ -48,15 +56,33 @@ export async function sendTelegramMessage(
 
     if (!res.ok) {
       const errText = await res.text();
-      console.warn('[TelegramService] Message send failed:', errText);
-      return false;
+      const errorMsg = `텔레그램 API HTTP ${res.status}: ${errText}`;
+      console.warn('[TelegramService] Message send failed:', errorMsg);
+      return {
+        success: false,
+        statusCode: res.status,
+        error: errorMsg,
+      };
     }
 
-    return true;
-  } catch (err) {
-    console.warn('[TelegramService] sendTelegramMessage exception:', err);
-    return false;
+    return { success: true };
+  } catch (err: any) {
+    const msg = `텔레그램 통신 예외: ${err?.message || err}`;
+    console.warn('[TelegramService] Exception:', msg);
+    return { success: false, error: msg };
   }
+}
+
+/**
+ * 텔레그램 메세지 전송 기본 불리언 함수
+ */
+export async function sendTelegramMessage(
+  message: string,
+  botToken?: string,
+  chatId?: string
+): Promise<boolean> {
+  const result = await sendTelegramMessageDetailed(message, botToken, chatId);
+  return result.success;
 }
 
 /**
@@ -79,15 +105,15 @@ export async function notifyAutoTradeStatus(
 }
 
 /**
- * 2. 장전 자동주문 제출 알림
+ * 2. 장전 자동주문 제출 알림 (상세 결과 반환)
  */
-export async function notifyOrdersSubmitted(
+export async function notifyOrdersSubmittedDetailed(
   cycleName: string,
   orders: Order[]
-): Promise<boolean> {
+): Promise<TelegramSendResult> {
   if (orders.length === 0) {
     const msg = `📋 <b>[장전 자동주문 알림]</b>\n\n사이클: <b>${cycleName}</b>\n제출 예정 주문이 없습니다.`;
-    return sendTelegramMessage(msg);
+    return sendTelegramMessageDetailed(msg);
   }
 
   const orderLines = orders
@@ -106,7 +132,15 @@ export async function notifyOrdersSubmitted(
     `<b>[주문 목록]</b>\n` +
     orderLines;
 
-  return sendTelegramMessage(message);
+  return sendTelegramMessageDetailed(message);
+}
+
+export async function notifyOrdersSubmitted(
+  cycleName: string,
+  orders: Order[]
+): Promise<boolean> {
+  const res = await notifyOrdersSubmittedDetailed(cycleName, orders);
+  return res.success;
 }
 
 /**

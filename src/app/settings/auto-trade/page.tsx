@@ -71,22 +71,46 @@ export default function AutoTradeSettingsPage() {
     await notifyAutoTradeStatus(cycle.name, nextVal, false);
   };
 
-  // 설정 저장 폼 제출
+  // 설정 저장 폼 제출 (서버 API 라우트로 이관)
   const handleSaveSettings = async (e: React.FormEvent) => {
     e.preventDefault();
     setIsSaving(true);
     try {
-      const saved = await updateAppSettings(settings);
-      setSettings(saved);
-      addLog('Supabase app_settings DB 저장 완료!');
-      alert('설정이 성공적으로 저장되었습니다.');
+      addLog('💾 /api/auto-trade 라우트로 app_settings DB 저장 요청 중...');
+      const res = await fetch('/api/auto-trade', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action: 'save-settings',
+          settings,
+        }),
+      });
 
-      // 텔레그램 연동 확인 테스트 메세지
-      if (settings.telegram_bot_token && settings.telegram_chat_id) {
-        await sendTelegramMessage(
-          `⚙️ <b>[루프 설정 저장 알림]</b>\n\n토스증권 및 텔레그램 설정이 성공적으로 갱신되었습니다.`
-        );
+      const data = await res.json();
+      if (res.ok && data.success) {
+        if (data.settings) {
+          setSettings(data.settings);
+        }
+        addLog('✅ 설정이 DB에 안전하게 저장되었습니다');
+        console.log('[AutoTradeSettings] Save success:', data.settings);
+        alert('✅ 설정이 DB에 안전하게 저장되었습니다.');
+
+        // 텔레그램 연동 확인 테스트 메세지
+        if (settings.telegram_bot_token && settings.telegram_chat_id) {
+          await sendTelegramMessage(
+            `⚙️ <b>[루프 설정 저장 알림]</b>\n\n토스증권 및 텔레그램 설정이 성공적으로 DB에 저장되었습니다.`
+          );
+        }
+      } else {
+        const errorDetail = data.error || data.message || '알 수 없는 서버 에러';
+        addLog(`🔴 DB 저장 실패: ${errorDetail}`);
+        console.error('[AutoTradeSettings] Save error:', errorDetail);
+        alert(errorDetail);
       }
+    } catch (err: any) {
+      const errStr = err?.message || '네트워크 오류';
+      addLog(`🔴 DB 저장 예외: ${errStr}`);
+      alert(`🔴 DB 저장 처리 중 오류가 발생했습니다: ${errStr}`);
     } finally {
       setIsSaving(false);
     }
@@ -108,8 +132,10 @@ export default function AutoTradeSettingsPage() {
       addLog(`📱 텔레그램 주문 제출보고서 발송 완료`);
       alert(`[${targetCycle.name}] 가상 주문 ${res.count}건이 제출되었으며 텔레그램으로 알림이 발송되었습니다.`);
     } else {
-      addLog(`🛑 보안 차단: ${res.message}`);
-      alert(res.message || '가상 주문 제출 중 보안 가드레일에 의해 차단되었습니다.');
+      const errorMsg = res.message || '가상 주문 처리 실패';
+      addLog(`🔴 DB/텔레그램 오류: ${errorMsg}`);
+      console.error('[TestOrderSubmit] Error:', errorMsg);
+      alert(errorMsg);
     }
   };
 
@@ -129,8 +155,10 @@ export default function AutoTradeSettingsPage() {
       addLog(`📱 텔레그램 체결 동기화보고서 발송 완료`);
       alert(`[${targetCycle.name}] 체결 내역 ${res.newLogs.length}건이 DB에 갱신되고 텔레그램 알림이 발송되었습니다.`);
     } else {
-      addLog(`❌ 동기화 실패: ${res.message}`);
-      alert(res.message || '체결 동기화 실패');
+      const errorMsg = res.message || '체결 동기화 실패';
+      addLog(`🔴 DB/텔레그램 오류: ${errorMsg}`);
+      console.error('[TestExecutionSync] Error:', errorMsg);
+      alert(errorMsg);
     }
   };
 
