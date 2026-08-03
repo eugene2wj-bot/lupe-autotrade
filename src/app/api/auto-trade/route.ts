@@ -34,8 +34,17 @@ export async function POST(request: Request) {
         );
       }
 
-      const payload = {
-        id: newSettings.id || 'default_settings',
+      // 기존 app_settings row의 id 유동 파악 (INTEGER vs TEXT 스키마 감지)
+      const { data: existingRow } = await supabaseAdmin
+        .from('app_settings')
+        .select('id')
+        .limit(1)
+        .maybeSingle();
+
+      let targetId: any = existingRow?.id ?? newSettings.id ?? 1;
+
+      const payload: any = {
+        id: targetId,
         is_global_auto_trade: newSettings.is_global_auto_trade ?? false,
         toss_app_key: newSettings.toss_app_key ?? '',
         toss_app_secret: newSettings.toss_app_secret ?? '',
@@ -53,11 +62,24 @@ export async function POST(request: Request) {
         .select('*')
         .single();
 
+      // 만약 integer 타입 에러 발생 시 id를 숫자 1로 변환하여 폴백 재시도
+      if (saveErr && (saveErr.message.includes('integer') || saveErr.code === '22P02')) {
+        console.warn('[AutoTradeAPI] ID integer syntax error. Retrying with numeric id: 1...');
+        payload.id = 1;
+        const retryInt = await supabaseAdmin
+          .from('app_settings')
+          .upsert(payload)
+          .select('*')
+          .single();
+        savedData = retryInt.data;
+        saveErr = retryInt.error;
+      }
+
       // auto_trade_time 컬럼이 Supabase DB 스키마에 존재하지 않는 경우 폴백 처리
       if (saveErr && saveErr.message.includes('auto_trade_time')) {
         console.warn('[AutoTradeAPI] auto_trade_time column missing in DB. Retrying without auto_trade_time field...');
         const fallbackPayload = { ...payload };
-        delete (fallbackPayload as any).auto_trade_time;
+        delete fallbackPayload.auto_trade_time;
         const retry = await supabaseAdmin
           .from('app_settings')
           .upsert(fallbackPayload)
@@ -73,7 +95,7 @@ export async function POST(request: Request) {
           {
             success: false,
             error: `DB 저장 실패: ${saveErr.message}`,
-            message: `🔴 DB 저장 실패: ${saveErr.message}. (Supabase SQL Editor에서 ALTER TABLE app_settings ADD COLUMN auto_trade_time TEXT; 실행 필요)`,
+            message: `🔴 DB 저장 실패: ${saveErr.message}`,
           },
           { status: 500 }
         );
