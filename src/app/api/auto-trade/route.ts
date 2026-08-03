@@ -433,6 +433,7 @@ export async function POST(request: Request) {
           price: o.price,
           qty: o.qty,
           status: 'simulated',
+          order_date: nyDateStr,
           order_response: {
             tossOrderRef: `TOSS_SERVER_${cycle.ticker}_${Date.now()}`,
             apiSource: 'server-route',
