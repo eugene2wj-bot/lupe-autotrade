@@ -3,51 +3,10 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 import type { Cycle, NewCycleFormState, StockQuote } from '@/types/cycle';
-import soxlQuotesRaw from '@/data/soxl_quotes.json';
 import { fetchCycles, saveCycle as saveCycleDb, deleteCycleFromDb as deleteCycleDb } from '@/services/dbService';
 
 // -------------------------------------------------------
-// 정적 주가 데이터 (soxl_quotes.json 기반)
-// soxl_quotes.json 구조: { prices: [{date, open, close, high, low}, ...] }
-// -------------------------------------------------------
-const soxlPrices = (soxlQuotesRaw as { prices: { date: string; open: number; close: number; high: number; low: number }[] }).prices;
-const soxlQuotes: StockQuote[] = soxlPrices.map((p) => ({ date: p.date, close: p.close }));
-
-const staticQuotes: Record<string, StockQuote[]> = {
-  SOXL: soxlQuotes,
-};
-
-
-export function getStaticQuotes(ticker: string): StockQuote[] {
-  return staticQuotes[ticker] ?? [];
-}
-
-/**
- * 사이클의 주가 데이터(히스토리) 추출 함수 (범용)
- * 1. staticQuotes에 티커가 존재하면 해당 정적 데이터 반환
- * 2. 없는 경우 cycle.logs 거래 내역의 일자별 가격(센트->달러)을 시계열로 자동 추출하여 반환
- */
-export function getQuotesForCycle(cycle: Cycle): StockQuote[] {
-  const staticList = getStaticQuotes(cycle.ticker);
-  if (staticList && staticList.length > 0) {
-    return staticList;
-  }
-  if (!cycle || !cycle.logs || cycle.logs.length === 0) {
-    return [];
-  }
-  const dateMap = new Map<string, number>();
-  const sorted = [...cycle.logs].sort((a, b) => a.date.localeCompare(b.date));
-  for (const log of sorted) {
-    if (log.price > 0) {
-      dateMap.set(log.date, Math.round((log.price / 100) * 100) / 100);
-    }
-  }
-  const derivedQuotes: StockQuote[] = [];
-  for (const [date, close] of dateMap.entries()) {
-    derivedQuotes.push({ date, close });
-  }
-  return derivedQuotes;
-}
+export { getStaticQuotes, getQuotesForCycle } from '@/utils/stockQuoteUtils';
 
 // -------------------------------------------------------
 // 스토어 타입

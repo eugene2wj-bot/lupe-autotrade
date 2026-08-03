@@ -2,7 +2,7 @@
 // 다중 주가 연동 체계 (Multi-Provider Stock Price Engine)
 // -------------------------------------------------------
 
-import { getStaticQuotes, getQuotesForCycle } from '@/store/cycleStore';
+import { getStaticQuotes, getQuotesForCycle } from '@/utils/stockQuoteUtils';
 import type { Cycle, StockQuote } from '@/types/cycle';
 
 export interface StockQuoteDetail {
