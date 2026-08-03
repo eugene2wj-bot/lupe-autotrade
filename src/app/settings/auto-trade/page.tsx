@@ -1,24 +1,90 @@
 'use client';
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, Component, type ReactNode } from 'react';
 import Link from 'next/link';
 import { useCycleStore } from '@/store/cycleStore';
-import { getAppSettings, updateAppSettings, saveCycle } from '@/services/dbService';
 import { notifyAutoTradeStatus, sendTelegramMessage } from '@/services/telegramService';
 import { submitSimulatedOrders, syncExecutions } from '@/services/tossBroker';
 import type { AppSettings, Cycle } from '@/types/cycle';
 
+// ── 안전 기본값 ──────────────────────────────────────────────
+const DEFAULT_SETTINGS: AppSettings = {
+  is_global_auto_trade: false,
+  toss_app_key: '',
+  toss_app_secret: '',
+  toss_account_no: '',
+  telegram_bot_token: '',
+  telegram_chat_id: '',
+  auto_trade_time: '22:30',
+};
+
+/** 데이터를 AppSettings 안전값으로 정규화 */
+function normalizeSettings(raw: any): AppSettings {
+  if (!raw || typeof raw !== 'object') return { ...DEFAULT_SETTINGS };
+  return {
+    is_global_auto_trade: raw.is_global_auto_trade ?? raw.isGlobalAutoTrade ?? false,
+    toss_app_key: raw.toss_app_key ?? raw.tossAppKey ?? '',
+    toss_app_secret: raw.toss_app_secret ?? raw.tossAppSecret ?? '',
+    toss_account_no: raw.toss_account_no ?? raw.tossAccountNo ?? '',
+    telegram_bot_token: raw.telegram_bot_token ?? raw.telegramBotToken ?? '',
+    telegram_chat_id: raw.telegram_chat_id ?? raw.telegramChatId ?? '',
+    auto_trade_time: raw.auto_trade_time ?? raw.autoTradeTime ?? '22:30',
+  };
+}
+
+// ── React Error Boundary ──────────────────────────────────────
+class SettingsErrorBoundary extends Component<
+  { children: ReactNode },
+  { hasError: boolean; errorMsg: string }
+> {
+  constructor(props: { children: ReactNode }) {
+    super(props);
+    this.state = { hasError: false, errorMsg: '' };
+  }
+  static getDerivedStateFromError(error: any) {
+    return { hasError: true, errorMsg: String(error?.message || error) };
+  }
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div className="max-w-4xl mx-auto p-8 text-center space-y-4">
+          <div className="text-4xl">⚠️</div>
+          <h2 className="text-lg font-bold text-gray-900 dark:text-gray-50">
+            설정 페이지를 불러오는 중 오류가 발생했습니다
+          </h2>
+          <p className="text-sm text-gray-500 dark:text-gray-400 font-mono bg-gray-50 dark:bg-gray-900 rounded-xl p-3">
+            {this.state.errorMsg}
+          </p>
+          <div className="flex justify-center gap-3">
+            <button
+              onClick={() => this.setState({ hasError: false, errorMsg: '' })}
+              className="px-4 py-2 bg-indigo-600 text-white text-sm font-bold rounded-xl hover:bg-indigo-700"
+            >
+              다시 시도
+            </button>
+            <Link href="/" className="px-4 py-2 bg-gray-100 dark:bg-gray-800 text-gray-700 dark:text-gray-200 text-sm font-bold rounded-xl">
+              메인으로
+            </Link>
+          </div>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
+
 export default function AutoTradeSettingsPage() {
+  return (
+    <SettingsErrorBoundary>
+      <AutoTradeSettingsInner />
+    </SettingsErrorBoundary>
+  );
+}
+
+function AutoTradeSettingsInner() {
   const { cycles, updateCycle } = useCycleStore();
-  const [settings, setSettings] = useState<AppSettings>({
-    is_global_auto_trade: false,
-    toss_app_key: '',
-    toss_app_secret: '',
-    toss_account_no: '',
-    telegram_bot_token: '',
-    telegram_chat_id: '',
-    auto_trade_time: '22:30',
-  });
+  const [settings, setSettings] = useState<AppSettings>({ ...DEFAULT_SETTINGS });
+  const [loadError, setLoadError] = useState<string | null>(null);
 
   const [isLoading, setIsLoading] = useState(true);
   const [isSaving, setIsSaving] = useState(false);
@@ -46,44 +112,58 @@ export default function AutoTradeSettingsPage() {
   const [showTelegramBotToken, setShowTelegramBotToken] = useState(false);
   const [showTelegramChatId, setShowTelegramChatId] = useState(false);
 
-  // 보안 인증(PIN) 성공 후 DB 데이터 자동 불러오기 (GET_SETTINGS 서버 수집)
+  // 보안 인증(PIN) 성공 후 DB 데이터 자동 불러오기
   useEffect(() => {
-    if (isUnlocked) {
-      async function loadData() {
-        setIsLoading(true);
-        try {
-          const res = await fetch('/api/auto-trade', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ action: 'GET_SETTINGS' }),
-          });
+    if (!isUnlocked) return;
 
-          const data = await res.json();
-          if (res.ok && data.success && data.settings) {
-            setSettings(data.settings);
+    let cancelled = false;
+    async function loadData() {
+      setIsLoading(true);
+      setLoadError(null);
+      try {
+        const res = await fetch('/api/auto-trade', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action: 'GET_SETTINGS' }),
+        });
+
+        if (!cancelled) {
+          if (res.ok) {
+            const data = await res.json().catch(() => ({}));
+            const rawSettings = data?.settings ?? data ?? null;
+            setSettings(normalizeSettings(rawSettings));
           } else {
-            const fetchedSettings = await getAppSettings();
-            setSettings(fetchedSettings);
+            // API 실패 시 기본값 유지, 에러 배너만 표시
+            setLoadError('설정 불러오기 실패 — 기본 설정 표시 중입니다.');
+            setSettings({ ...DEFAULT_SETTINGS });
           }
-
-          if (cycles.length > 0) {
-            setSelectedCycleId(cycles[0].id);
-          }
-        } catch {
-          const fetchedSettings = await getAppSettings();
-          setSettings(fetchedSettings);
-        } finally {
+        }
+      } catch (err: any) {
+        if (!cancelled) {
+          setLoadError(`설정 불러오기 오류: ${err?.message || '네트워크 오류'} — 기본 설정 표시 중입니다.`);
+          setSettings({ ...DEFAULT_SETTINGS });
+        }
+      } finally {
+        if (!cancelled) {
           setIsLoading(false);
         }
       }
-      loadData();
+
+      // 사이클 초기 선택
+      if (!cancelled && Array.isArray(cycles) && cycles.length > 0 && !selectedCycleId) {
+        setSelectedCycleId(cycles[0]?.id ?? null);
+      }
     }
-  }, [isUnlocked, cycles]);
+
+    loadData();
+    return () => { cancelled = true; };
+  }, [isUnlocked]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const addLog = (msg: string) => {
     const time = new Date().toLocaleTimeString('ko-KR');
     setTestLog((prev) => [`[${time}] ${msg}`, ...prev.slice(0, 30)]);
   };
+
 
   // 🔒 PIN 번호 인증 처리
   const handleVerifyPin = async (e?: React.FormEvent) => {
@@ -169,23 +249,38 @@ export default function AutoTradeSettingsPage() {
 
   // 전역 자동매매 토글
   const handleGlobalToggle = async () => {
-    const nextVal = !settings.is_global_auto_trade;
-    const updated = { ...settings, is_global_auto_trade: nextVal };
-    setSettings(updated);
-
-    await updateAppSettings({ is_global_auto_trade: nextVal });
+    const nextVal = !(settings?.is_global_auto_trade ?? false);
+    setSettings((prev) => ({ ...DEFAULT_SETTINGS, ...prev, is_global_auto_trade: nextVal }));
     addLog(`전역 자동매매 상태 변경: ${nextVal ? 'ON 🟢' : 'OFF 🔴'}`);
-    await notifyAutoTradeStatus('전역 설정', nextVal, true);
+    try {
+      await fetch('/api/auto-trade', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'toggle-auto-trade', isGlobal: true, status: nextVal }),
+      });
+      await notifyAutoTradeStatus('전역 설정', nextVal, true).catch(() => {});
+    } catch (err: any) {
+      addLog(`🔴 전역 토글 오류: ${err?.message || err}`);
+    }
   };
 
   // 개별 사이클 자동매매 토글
   const handleCycleToggle = async (cycle: Cycle) => {
-    const nextVal = !(cycle.autoTradeEnabled ?? true);
-    updateCycle(cycle.id, { autoTradeEnabled: nextVal });
-
-    await saveCycle({ ...cycle, autoTradeEnabled: nextVal });
-    addLog(`사이클 [${cycle.name}] 자동매매: ${nextVal ? 'ON 🟢' : 'OFF 🔴'}`);
-    await notifyAutoTradeStatus(cycle.name, nextVal, false);
+    const nextVal = !(cycle?.autoTradeEnabled ?? true);
+    try {
+      updateCycle(cycle.id, { autoTradeEnabled: nextVal });
+    } catch { /* store 오류 무시 */ }
+    addLog(`사이클 [${cycle?.name ?? '?'}] 자동매매: ${nextVal ? 'ON 🟢' : 'OFF 🔴'}`);
+    try {
+      await fetch('/api/auto-trade', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'toggle-auto-trade', isGlobal: false, cycleId: cycle.id, status: nextVal }),
+      });
+      await notifyAutoTradeStatus(cycle?.name ?? '사이클', nextVal, false).catch(() => {});
+    } catch (err: any) {
+      addLog(`🔴 사이클 토글 오류: ${err?.message || err}`);
+    }
   };
 
   // 설정 저장 폼 제출
@@ -222,10 +317,10 @@ export default function AutoTradeSettingsPage() {
         }),
       });
 
-      const data = await res.json();
+      const data = await res.json().catch(() => ({}));
       if (res.ok && data.success) {
         if (data.settings) {
-          setSettings(data.settings);
+          setSettings(normalizeSettings(data.settings));
         }
         addLog('✅ 설정이 DB에 안전하게 저장되었습니다');
         alert('✅ 설정이 DB에 안전하게 저장되었습니다.');
@@ -399,6 +494,35 @@ export default function AutoTradeSettingsPage() {
 
   return (
     <div className="max-w-4xl mx-auto space-y-6 pb-12">
+      {/* ── 로딩 중 스켈레톤 ── */}
+      {isLoading && (
+        <div className="bg-white dark:bg-gray-900 rounded-2xl p-6 shadow-xs border border-gray-100 dark:border-gray-800 animate-pulse space-y-3">
+          <div className="h-4 w-48 bg-gray-200 dark:bg-gray-700 rounded-lg" />
+          <div className="h-3 w-full bg-gray-100 dark:bg-gray-800 rounded-lg" />
+          <div className="h-3 w-3/4 bg-gray-100 dark:bg-gray-800 rounded-lg" />
+          <p className="text-xs text-gray-400 dark:text-gray-500 pt-1">설정 정보를 불러오는 중...</p>
+        </div>
+      )}
+
+      {/* ── 설정 불러오기 에러 배너 (페이지 튕김 없이 인라인 표시) ── */}
+      {!isLoading && loadError && (
+        <div className="bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800 rounded-2xl p-4 flex items-start gap-3">
+          <span className="text-lg flex-shrink-0">⚠️</span>
+          <div className="flex-1 min-w-0">
+            <p className="text-xs font-semibold text-amber-800 dark:text-amber-300">{loadError}</p>
+            <p className="text-xs text-amber-600 dark:text-amber-400 mt-0.5">
+              설정을 저장하거나 수동으로 입력한 후 저장 버튼을 눌러주세요.
+            </p>
+          </div>
+          <button
+            onClick={() => setLoadError(null)}
+            className="text-amber-400 hover:text-amber-600 text-sm font-bold flex-shrink-0"
+          >
+            ✕
+          </button>
+        </div>
+      )}
+
       {/* ── 헤더 타이틀 및 메인으로 이동 ── */}
       <div className="flex items-center justify-between">
         <div>
