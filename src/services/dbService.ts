@@ -7,7 +7,6 @@ import type { AppSettings, AutoOrder, Cycle, DailyRecord, TradeLog } from '@/typ
 import initialCyclesData from '@/data/cycles.json';
 
 import { calcCycleStats } from '@/utils/calculator';
-import { getQuotesForCycle } from '@/store/cycleStore';
 
 const DEFAULT_SETTINGS: AppSettings = {
   is_global_auto_trade: false,
@@ -81,8 +80,7 @@ export async function restoreInitialDataToDb(): Promise<{
       }
 
       // 📊 포지션 및 통계 (T회차, 평단가, 보유수량) 자동 재계산
-      const quotes = getQuotesForCycle(c);
-      const stats = calcCycleStats(c, quotes);
+      const stats = calcCycleStats(c, []);
 
       // daily_records 업데이트
       const latestDate = c.logs && c.logs.length > 0
